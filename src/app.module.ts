@@ -23,6 +23,7 @@ import { NotificationsModule } from './notifications/notifications.module';
 import { MessagesModule } from './messages/messages.module';
 import { AdminModule } from './admin/admin.module';
 import { ContactModule } from './contact/contact.module';
+import { UploadModule } from './upload/upload.module';
 
 @Module({
   imports: [
@@ -52,6 +53,7 @@ import { ContactModule } from './contact/contact.module';
     MessagesModule,
     AdminModule,
     ContactModule,
+    UploadModule,
   ],
   controllers: [AppController],
   providers: [AppService],

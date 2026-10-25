@@ -4,12 +4,20 @@ import { GigStatus } from '@prisma/client';
 import { Type } from 'class-transformer';
 
 export class CreateGigDto {
-  @ApiProperty() @IsString() categoryId: string;
+  @ApiPropertyOptional() @IsString() @IsOptional() categoryId?: string;
+  @ApiPropertyOptional() @IsString() @IsOptional() category?: string;
   @ApiPropertyOptional() @IsString() @IsOptional() subCategoryId?: string;
   @ApiProperty() @IsString() title: string;
   @ApiProperty() @IsString() description: string;
   @ApiPropertyOptional({ type: [String] }) @IsArray() @IsOptional() tags?: string[];
   @ApiPropertyOptional() @IsOptional() faqs?: any;
+  @ApiPropertyOptional() @IsArray() @IsOptional() packages?: any[];
+  @ApiPropertyOptional({ type: [String] }) @IsArray() @IsOptional() images?: string[];
+  @ApiPropertyOptional({ type: [String] }) @IsArray() @IsOptional() gallery?: string[];
+  @ApiPropertyOptional({ type: [String] }) @IsArray() @IsOptional() galleryUrls?: string[];
+  @ApiPropertyOptional() @IsString() @IsOptional() occasion?: string;
+  @ApiPropertyOptional() @IsNumber() @IsOptional() travelRadius?: number;
+  @ApiPropertyOptional() @IsBoolean() @IsOptional() outsideRadiusAllowed?: boolean;
 }
 
 export class UpdateGigDto extends PartialType(CreateGigDto) {
