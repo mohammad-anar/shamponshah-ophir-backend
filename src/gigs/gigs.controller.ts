@@ -3,14 +3,19 @@ import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { GigsService } from './gigs.service';
 import { CreateGigDto, UpdateGigDto, CreateGigPackageDto, GigQueryDto } from './dto/gig.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
-import { RolesGuard } from '../auth/guards/roles.guard';
-import { Roles } from '../auth/decorators/roles.decorator';
-import { Role } from '@prisma/client';
 
 @ApiTags('Gigs')
 @Controller()
 export class GigsController {
   constructor(private readonly gigsService: GigsService) {}
+
+  private async resolveVendorProfileId(user: any): Promise<string> {
+    if (user?.vendorProfileId) return user.vendorProfileId;
+    const userId = user?.id || user?.sub;
+    if (!userId) return '';
+    const vp = await this.gigsService.getOrCreateVendorProfile(userId, user?.email);
+    return vp?.id || '';
+  }
 
   // ── PUBLIC ─────────────────────────────────────────────────
 
@@ -30,66 +35,66 @@ export class GigsController {
 
   @Post('vendor/gigs')
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(Role.VENDOR)
+  @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Create a new gig (Vendor)' })
-  create(@Req() req: any, @Body() dto: CreateGigDto) {
-    return this.gigsService.create(req.user.vendorProfileId, dto);
+  async create(@Req() req: any, @Body() dto: CreateGigDto) {
+    const vendorProfileId = await this.resolveVendorProfileId(req.user);
+    return this.gigsService.create(vendorProfileId, dto);
   }
 
   @Get('vendor/gigs')
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(Role.VENDOR)
+  @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'List my gigs (Vendor)' })
-  getMyGigs(@Req() req: any) {
-    return this.gigsService.findVendorGigs(req.user.vendorProfileId);
+  async getMyGigs(@Req() req: any) {
+    const vendorProfileId = await this.resolveVendorProfileId(req.user);
+    return this.gigsService.findVendorGigs(vendorProfileId);
   }
 
   @Patch('vendor/gigs/:id')
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(Role.VENDOR)
+  @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Update gig (Vendor)' })
-  update(@Param('id') id: string, @Req() req: any, @Body() dto: UpdateGigDto) {
-    return this.gigsService.update(id, req.user.vendorProfileId, dto);
+  async update(@Param('id') id: string, @Req() req: any, @Body() dto: UpdateGigDto) {
+    const vendorProfileId = await this.resolveVendorProfileId(req.user);
+    return this.gigsService.update(id, vendorProfileId, dto);
   }
 
   @Delete('vendor/gigs/:id')
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(Role.VENDOR)
+  @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Archive gig (Vendor)' })
-  remove(@Param('id') id: string, @Req() req: any) {
-    return this.gigsService.remove(id, req.user.vendorProfileId);
+  async remove(@Param('id') id: string, @Req() req: any) {
+    const vendorProfileId = await this.resolveVendorProfileId(req.user);
+    return this.gigsService.remove(id, vendorProfileId);
   }
 
   // ── VENDOR: Packages ───────────────────────────────────────
 
   @Post('vendor/gig-packages')
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(Role.VENDOR)
+  @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Add package to gig (Vendor)' })
-  createPackage(@Req() req: any, @Body() dto: CreateGigPackageDto) {
-    return this.gigsService.createPackage(req.user.vendorProfileId, dto);
+  async createPackage(@Req() req: any, @Body() dto: CreateGigPackageDto) {
+    const vendorProfileId = await this.resolveVendorProfileId(req.user);
+    return this.gigsService.createPackage(vendorProfileId, dto);
   }
 
   @Patch('vendor/gig-packages/:id')
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(Role.VENDOR)
+  @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Update gig package (Vendor)' })
-  updatePackage(@Param('id') id: string, @Req() req: any, @Body() dto: Partial<CreateGigPackageDto>) {
-    return this.gigsService.updatePackage(id, req.user.vendorProfileId, dto);
+  async updatePackage(@Param('id') id: string, @Req() req: any, @Body() dto: Partial<CreateGigPackageDto>) {
+    const vendorProfileId = await this.resolveVendorProfileId(req.user);
+    return this.gigsService.updatePackage(id, vendorProfileId, dto);
   }
 
   @Delete('vendor/gig-packages/:id')
   @ApiBearerAuth()
-  @UseGuards(JwtAuthGuard, RolesGuard)
-  @Roles(Role.VENDOR)
+  @UseGuards(JwtAuthGuard)
   @ApiOperation({ summary: 'Delete gig package (Vendor)' })
-  deletePackage(@Param('id') id: string, @Req() req: any) {
-    return this.gigsService.deletePackage(id, req.user.vendorProfileId);
+  async deletePackage(@Param('id') id: string, @Req() req: any) {
+    const vendorProfileId = await this.resolveVendorProfileId(req.user);
+    return this.gigsService.deletePackage(id, vendorProfileId);
   }
 }
