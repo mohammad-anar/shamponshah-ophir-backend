@@ -1,0 +1,42 @@
+import { IsString, IsOptional, IsArray, IsEnum, IsNumber, IsBoolean } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional, PartialType } from '@nestjs/swagger';
+import { GigStatus } from '@prisma/client';
+import { Type } from 'class-transformer';
+
+export class CreateGigDto {
+  @ApiProperty() @IsString() categoryId: string;
+  @ApiPropertyOptional() @IsString() @IsOptional() subCategoryId?: string;
+  @ApiProperty() @IsString() title: string;
+  @ApiProperty() @IsString() description: string;
+  @ApiPropertyOptional({ type: [String] }) @IsArray() @IsOptional() tags?: string[];
+  @ApiPropertyOptional() @IsOptional() faqs?: any;
+}
+
+export class UpdateGigDto extends PartialType(CreateGigDto) {
+  @ApiPropertyOptional({ enum: GigStatus })
+  @IsEnum(GigStatus)
+  @IsOptional()
+  status?: GigStatus;
+}
+
+export class CreateGigPackageDto {
+  @ApiProperty() @IsString() gigId: string;
+  @ApiProperty() @IsString() title: string;
+  @ApiProperty() @IsString() description: string;
+  @ApiProperty() @Type(() => Number) @IsNumber() price: number;
+  @ApiPropertyOptional() @IsString() @IsOptional() hours?: string;
+  @ApiPropertyOptional() @IsString() @IsOptional() turnaround?: string;
+  @ApiPropertyOptional() @IsBoolean() @IsOptional() isPopular?: boolean;
+  @ApiPropertyOptional({ type: [String] }) @IsArray() @IsOptional() features?: string[];
+  @ApiPropertyOptional() @IsOptional() escrowSplitJson?: any;
+  @ApiPropertyOptional() @Type(() => Number) @IsNumber() @IsOptional() sortOrder?: number;
+}
+
+export class GigQueryDto {
+  @ApiPropertyOptional() @IsString() @IsOptional() categoryId?: string;
+  @ApiPropertyOptional() @IsString() @IsOptional() search?: string;
+  @ApiPropertyOptional() @Type(() => Number) @IsNumber() @IsOptional() minPrice?: number;
+  @ApiPropertyOptional() @Type(() => Number) @IsNumber() @IsOptional() maxPrice?: number;
+  @ApiPropertyOptional() @Type(() => Number) @IsNumber() @IsOptional() page?: number = 1;
+  @ApiPropertyOptional() @Type(() => Number) @IsNumber() @IsOptional() limit?: number = 12;
+}
