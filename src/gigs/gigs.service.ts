@@ -174,7 +174,7 @@ export class GigsService {
           gallery: { orderBy: { sortOrder: 'asc' } },
           _count: { select: { gigReviews: true } },
         },
-        orderBy: { orderCount: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { orderCount: 'desc' }],
       }),
       this.prisma.gig.count({ where }),
     ]);
@@ -218,6 +218,7 @@ export class GigsService {
   }
 
   async findVendorGigs(vendorProfileId: string) {
+    if (!vendorProfileId) return [];
     return this.prisma.gig.findMany({
       where: { vendorProfileId },
       include: {
@@ -230,8 +231,29 @@ export class GigsService {
     });
   }
 
+  async getOrCreateVendorProfile(userId: string, email?: string) {
+    let vp = await this.prisma.vendorProfile.findUnique({
+      where: { userId },
+    });
+    if (!vp) {
+      const baseName = email ? email.split('@')[0] : `Vendor-${Date.now().toString(36)}`;
+      vp = await this.prisma.vendorProfile.create({
+        data: {
+          userId,
+          businessName: baseName,
+          slug: this.toSlug(baseName),
+        },
+      });
+    }
+    return vp;
+  }
+
   async update(gigId: string, vendorProfileId: string, dto: UpdateGigDto) {
-    const gig = await this.prisma.gig.findUnique({ where: { id: gigId } });
+    const gig = await this.prisma.gig.findFirst({
+      where: {
+        OR: [{ id: gigId }, { slug: gigId }],
+      },
+    });
     if (!gig) throw new NotFoundException('Gig not found');
     if (gig.vendorProfileId !== vendorProfileId) throw new ForbiddenException();
 
@@ -247,14 +269,47 @@ export class GigsService {
       ...gigFields
     } = dto as any;
 
-    const updated = await this.prisma.gig.update({ where: { id: gigId }, data: gigFields });
+    if (category && !gigFields.categoryId) {
+      const cat = await this.prisma.category.findFirst({
+        where: {
+          OR: [
+            { id: category },
+            { name: { contains: category, mode: 'insensitive' } },
+            { slug: { contains: this.toSlug(category), mode: 'insensitive' } },
+          ],
+        },
+      });
+      if (cat) gigFields.categoryId = cat.id;
+    }
+
+    const updated = await this.prisma.gig.update({ where: { id: gig.id }, data: gigFields });
 
     const newGallery = images || gallery || galleryUrls;
     if (newGallery && Array.isArray(newGallery) && newGallery.length > 0) {
-      await this.prisma.gigGalleryItem.deleteMany({ where: { gigId } });
+      await this.prisma.gigGalleryItem.deleteMany({ where: { gigId: gig.id } });
       for (let i = 0; i < newGallery.length; i++) {
         await this.prisma.gigGalleryItem.create({
-          data: { gigId, url: newGallery[i], sortOrder: i },
+          data: { gigId: gig.id, url: newGallery[i], sortOrder: i },
+        });
+      }
+    }
+
+    if (packages && Array.isArray(packages) && packages.length > 0) {
+      await this.prisma.gigPackage.deleteMany({ where: { gigId: gig.id } });
+      for (let i = 0; i < packages.length; i++) {
+        const p = packages[i];
+        await this.prisma.gigPackage.create({
+          data: {
+            gigId: gig.id,
+            vendorProfileId,
+            title: p.name || p.title || `Tier ${i + 1}`,
+            description: p.description || 'Full coverage with sound and event coordination',
+            price: Number(p.price) || 450,
+            turnaround: p.turnaroundDays ? `${p.turnaroundDays} days` : (p.turnaround || '3 days'),
+            sortOrder: i,
+            isPopular: p.isPopular ?? (i === 1),
+            features: p.features || ['Full equipment setup', 'Guaranteed milestone escrow safety', 'Vetted professional craft'],
+          },
         });
       }
     }
@@ -265,11 +320,15 @@ export class GigsService {
   }
 
   async remove(gigId: string, vendorProfileId: string) {
-    const gig = await this.prisma.gig.findUnique({ where: { id: gigId } });
+    const gig = await this.prisma.gig.findFirst({
+      where: {
+        OR: [{ id: gigId }, { slug: gigId }],
+      },
+    });
     if (!gig) throw new NotFoundException('Gig not found');
     if (gig.vendorProfileId !== vendorProfileId) throw new ForbiddenException();
 
-    await this.prisma.gig.update({ where: { id: gigId }, data: { status: GigStatus.ARCHIVED } });
+    await this.prisma.gig.update({ where: { id: gig.id }, data: { status: GigStatus.ARCHIVED } });
     await this.redis.del(`gig:${gig.slug}`);
     await this.redis.delPattern('gigs:list:*');
     return { message: 'Gig archived' };
