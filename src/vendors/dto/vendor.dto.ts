@@ -108,9 +108,15 @@ export class CreateBlockedDateDto {
 }
 
 export class CreatePortfolioItemDto {
-  @ApiProperty({ example: 'https://images.unsplash.com/photo-example' })
+  @ApiPropertyOptional({ example: 'https://images.unsplash.com/photo-example' })
+  @IsOptional()
   @IsString()
-  url: string;
+  url?: string;
+
+  @ApiPropertyOptional({ example: 'https://images.unsplash.com/photo-example' })
+  @IsOptional()
+  @IsString()
+  image?: string;
 
   @ApiPropertyOptional({ example: 'image' })
   @IsOptional()
@@ -121,6 +127,11 @@ export class CreatePortfolioItemDto {
   @IsOptional()
   @IsString()
   caption?: string;
+
+  @ApiPropertyOptional({ example: 'Garden Wedding Ceremony' })
+  @IsOptional()
+  @IsString()
+  title?: string;
 
   @ApiPropertyOptional({ example: 0 })
   @IsOptional()
@@ -139,10 +150,10 @@ export class VendorQueryDto {
   @IsString()
   city?: string;
 
-  @ApiPropertyOptional({ description: 'Minimum rating (1-5)' })
+  @ApiPropertyOptional({ description: 'Minimum rating (e.g. 4.5)' })
   @IsOptional()
-  @Type(() => Number)
   @IsNumber()
+  @Type(() => Number)
   minRating?: number;
 
   @ApiPropertyOptional({ description: 'Vendor tier (SPROUT, RISING, PRO, ELITE)' })
@@ -155,15 +166,15 @@ export class VendorQueryDto {
   @IsString()
   search?: string;
 
-  @ApiPropertyOptional({ default: 1 })
+  @ApiPropertyOptional({ description: 'Page number', default: 1 })
   @IsOptional()
-  @Type(() => Number)
   @IsNumber()
+  @Type(() => Number)
   page?: number = 1;
 
-  @ApiPropertyOptional({ default: 12 })
+  @ApiPropertyOptional({ description: 'Items per page', default: 12 })
   @IsOptional()
-  @Type(() => Number)
   @IsNumber()
+  @Type(() => Number)
   limit?: number = 12;
 }
