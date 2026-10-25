@@ -248,6 +248,7 @@ export class VendorsService {
   // ── Vendor Authenticated: Profile & Onboarding ─────────────
 
   async getMyProfile(vendorProfileId: string) {
+    if (!vendorProfileId) throw new NotFoundException('Vendor profile not found');
     const vendor = await this.prisma.vendorProfile.findUnique({
       where: { id: vendorProfileId },
       include: {
@@ -260,6 +261,36 @@ export class VendorsService {
 
     if (!vendor) throw new NotFoundException('Vendor profile not found');
     return vendor;
+  }
+
+  async getOrCreateVendorProfile(userId: string, email?: string) {
+    let vp = await this.prisma.vendorProfile.findUnique({
+      where: { userId },
+      include: {
+        categories: { include: { category: true } },
+        portfolio: { orderBy: { sortOrder: 'asc' } },
+        blockedDates: { orderBy: { date: 'asc' } },
+        levelHistory: { orderBy: { createdAt: 'desc' }, take: 5 },
+      },
+    });
+    if (!vp) {
+      const baseName = email ? email.split('@')[0] : `Vendor-${Date.now().toString(36)}`;
+      const slug = baseName.toLowerCase().replace(/[^a-z0-9]+/g, '-') + '-' + Date.now().toString(36);
+      vp = await this.prisma.vendorProfile.create({
+        data: {
+          userId,
+          businessName: baseName,
+          slug,
+        },
+        include: {
+          categories: { include: { category: true } },
+          portfolio: { orderBy: { sortOrder: 'asc' } },
+          blockedDates: { orderBy: { date: 'asc' } },
+          levelHistory: { orderBy: { createdAt: 'desc' }, take: 5 },
+        },
+      });
+    }
+    return vp;
   }
 
   async submitOnboarding(vendorProfileId: string, dto: VendorOnboardingDto) {
@@ -499,15 +530,30 @@ export class VendorsService {
   // ── Portfolio ──────────────────────────────────────────────
 
   async addPortfolioItem(vendorProfileId: string, dto: CreatePortfolioItemDto) {
-    return this.prisma.portfolioItem.create({
+    const itemUrl = dto.url || dto.image || '';
+    if (!itemUrl) {
+      throw new BadRequestException('Image URL is required');
+    }
+
+    const created = await this.prisma.portfolioItem.create({
       data: {
         vendorProfileId,
-        url: dto.url,
+        url: itemUrl,
         type: dto.type || 'image',
-        caption: dto.caption,
+        caption: dto.caption || dto.title || 'Celebration Portfolio Item',
         sortOrder: dto.sortOrder || 0,
       },
     });
+
+    const vendor = await this.prisma.vendorProfile.findUnique({
+      where: { id: vendorProfileId },
+      select: { slug: true },
+    });
+    if (vendor?.slug) {
+      await this.redis.del(`vendor:profile:${vendor.slug}`);
+    }
+
+    return created;
   }
 
   async deletePortfolioItem(vendorProfileId: string, id: string) {
@@ -518,6 +564,74 @@ export class VendorsService {
 
     await this.prisma.portfolioItem.delete({ where: { id } });
     return { message: 'Portfolio item deleted' };
+  }
+
+  async getShowcase() {
+    const items = await this.prisma.portfolioItem.findMany({
+      take: 12,
+      orderBy: { createdAt: 'desc' },
+      include: {
+        vendorProfile: {
+          select: {
+            id: true,
+            businessName: true,
+            slug: true,
+            avatarUrl: true,
+            city: true,
+            state: true,
+            tier: true,
+            categories: { include: { category: true } },
+          },
+        },
+      },
+    });
+
+    if (items && items.length > 0) {
+      return items;
+    }
+
+    return [
+      {
+        id: 'showcase-1',
+        url: 'https://images.unsplash.com/photo-1519741497674-611481863552?auto=format&fit=crop&w=1200&q=80',
+        caption: 'Luxury Milestone Wedding Ceremony & Stage',
+        vendorProfile: {
+          businessName: 'Royal Stage & Floral Design',
+          city: 'Chicago, IL',
+          tier: 'ELITE',
+        },
+      },
+      {
+        id: 'showcase-2',
+        url: 'https://images.unsplash.com/photo-1516450360452-9312f5e86fc7?auto=format&fit=crop&w=1200&q=80',
+        caption: 'Concert Audio Rig & Moving Lights for Youth Gala',
+        vendorProfile: {
+          businessName: 'Party Pulse Events',
+          city: 'Chicago, IL',
+          tier: 'PRO',
+        },
+      },
+      {
+        id: 'showcase-3',
+        url: 'https://images.unsplash.com/photo-1555244162-803834f70033?auto=format&fit=crop&w=1200&q=80',
+        caption: 'Gourmet Plated Multi-Course Reception Catering',
+        vendorProfile: {
+          businessName: 'Artisanal Culinary Guild',
+          city: 'Naperville, IL',
+          tier: 'ELITE',
+        },
+      },
+      {
+        id: 'showcase-4',
+        url: 'https://images.unsplash.com/photo-1511795409834-ef04bbd61622?auto=format&fit=crop&w=1200&q=80',
+        caption: 'Grand Ballroom Sunset Ambient Lighting',
+        vendorProfile: {
+          businessName: 'Lumina Atmos Production',
+          city: 'Austin, TX',
+          tier: 'PRO',
+        },
+      },
+    ];
   }
 
   // ── Client: Save / Bookmark Vendor ─────────────────────────
