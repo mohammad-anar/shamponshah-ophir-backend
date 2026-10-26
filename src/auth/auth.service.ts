@@ -4,7 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { PrismaService } from '../prisma/prisma.service';
 import { RegisterDto, LoginDto, ForgotPasswordDto, ResetPasswordDto } from './dto/auth.dto';
 import * as bcrypt from 'bcrypt';
-import { Role } from '@prisma/client';
+import { Role, VendorStatus } from '@prisma/client';
 
 @Injectable()
 export class AuthService {
@@ -20,6 +20,7 @@ export class AuthService {
 
     const passwordHash = await bcrypt.hash(dto.password, 12);
     const emailToken = this.generateToken();
+    console.log(`[AUTH] Registered user ${dto.email} with verification code: ${emailToken}`);
 
     const user = await this.prisma.user.create({
       data: {
@@ -122,15 +123,43 @@ export class AuthService {
   }
 
   async verifyEmail(token: string) {
-    const user = await this.prisma.user.findFirst({ where: { emailToken: token } });
-    if (!user) throw new BadRequestException('Invalid verification token');
+    const user = await this.prisma.user.findFirst({
+      where: { emailToken: token },
+      include: { vendorProfile: true },
+    });
+    if (!user) throw new BadRequestException('Invalid or expired verification token');
 
     await this.prisma.user.update({
       where: { id: user.id },
       data: { isEmailVerified: true, emailToken: null },
     });
 
-    return { message: 'Email verified successfully' };
+    // Vendor verification directly activates the account (no manual admin approval)
+    if (user.role === Role.VENDOR && user.vendorProfile) {
+      await this.prisma.vendorProfile.update({
+        where: { id: user.vendorProfile.id },
+        data: { status: VendorStatus.APPROVED },
+      });
+    }
+
+    return { message: 'Email verified successfully', role: user.role };
+  }
+
+  async resendVerification(email: string) {
+    const user = await this.prisma.user.findUnique({ where: { email } });
+    if (!user) throw new NotFoundException('User with this email not found');
+    if (user.isEmailVerified) {
+      return { message: 'Email is already verified', alreadyVerified: true };
+    }
+
+    const emailToken = this.generateToken();
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: { emailToken },
+    });
+
+    console.log(`[AUTH] Resent verification code to ${email}: ${emailToken}`);
+    return { message: 'Verification email sent successfully', token: emailToken };
   }
 
   async getMe(userId: string) {
@@ -168,7 +197,7 @@ export class AuthService {
   }
 
   private generateToken() {
-    return Math.random().toString(36).slice(2) + Date.now().toString(36);
+    return Math.floor(100000 + Math.random() * 900000).toString();
   }
 
   private toSlug(str: string) {
