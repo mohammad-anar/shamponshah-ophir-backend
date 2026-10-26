@@ -11,8 +11,9 @@ export class AuthController {
 
   @Post('register')
   @ApiOperation({ summary: 'Register new user (CLIENT or VENDOR)' })
-  register(@Body() dto: RegisterDto) {
-    return this.authService.register(dto);
+  register(@Body() dto: RegisterDto, @Req() req: any) {
+    const ip = req.headers?.['x-forwarded-for']?.toString().split(',')[0].trim() || req.ip || '127.0.0.1';
+    return this.authService.register(dto, ip);
   }
 
   @Post('login')
@@ -55,8 +56,9 @@ export class AuthController {
 
   @Post('resend-verification')
   @ApiOperation({ summary: 'Resend email verification token' })
-  resendVerification(@Body() dto: ResendVerificationDto) {
-    return this.authService.resendVerification(dto.email);
+  resendVerification(@Body() dto: ResendVerificationDto, @Req() req: any) {
+    const ip = req.headers?.['x-forwarded-for']?.toString().split(',')[0].trim() || req.ip || '127.0.0.1';
+    return this.authService.resendVerification(dto.email, ip);
   }
 
   @Get('me')
