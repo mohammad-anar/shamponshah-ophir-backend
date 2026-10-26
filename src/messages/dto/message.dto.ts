@@ -28,3 +28,15 @@ export class StartConversationDto {
   @IsString()
   initialMessage?: string;
 }
+
+export class SendOrderMessageDto {
+  @ApiPropertyOptional({ example: 'Hello! I have uploaded the draft for review.' })
+  @IsOptional()
+  @IsString()
+  content?: string;
+
+  @ApiPropertyOptional({ type: [String], example: ['https://example.com/uploads/photo.jpg'] })
+  @IsOptional()
+  @IsArray()
+  attachments?: string[];
+}
