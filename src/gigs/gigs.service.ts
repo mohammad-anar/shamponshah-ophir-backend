@@ -1,4 +1,4 @@
-import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { CreateGigDto, UpdateGigDto, CreateGigPackageDto, GigQueryDto, ReportGigDto } from './dto/gig.dto';
@@ -15,44 +15,26 @@ export class GigsService {
   ) {}
 
   async create(vendorProfileId: string, dto: CreateGigDto) {
-    let catId = dto.categoryId;
-    if (catId) {
-      const existingCat = await this.prisma.category.findUnique({
-        where: { id: catId },
-      });
-      if (!existingCat) {
-        catId = undefined;
-      }
+    const rawCat = dto.categoryId || dto.category;
+    if (!rawCat) {
+      throw new BadRequestException('A valid category is required to create a service/gig');
     }
 
-    if (!catId && dto.category) {
-      const cat = await this.prisma.category.findFirst({
-        where: {
-          OR: [
-            { name: { contains: dto.category, mode: 'insensitive' } },
-            { slug: { contains: this.toSlug(dto.category), mode: 'insensitive' } },
-          ],
-        },
-      });
-      catId = cat?.id;
+    let cat = await this.prisma.category.findFirst({
+      where: {
+        OR: [
+          { id: rawCat },
+          { slug: rawCat },
+          { name: { equals: rawCat, mode: 'insensitive' } },
+        ],
+      },
+    });
+
+    if (!cat || !cat.isActive) {
+      throw new BadRequestException('The selected category does not exist or is inactive. Please choose an active category.');
     }
 
-    if (!catId) {
-      const fallbackCat = await this.prisma.category.findFirst({
-        where: { isActive: true },
-      });
-      catId = fallbackCat?.id;
-    }
-
-    if (!catId) {
-      const newCat = await this.prisma.category.create({
-        data: {
-          name: dto.category || 'Event Services',
-          slug: this.toSlug(dto.category || 'event-services'),
-        },
-      });
-      catId = newCat.id;
-    }
+    const catId = cat.id;
 
     const slug = this.toSlug(dto.title);
 
@@ -307,17 +289,21 @@ export class GigsService {
       ...gigFields
     } = dto as any;
 
-    if (category && !gigFields.categoryId) {
+    const requestedCat = gigFields.categoryId || category;
+    if (requestedCat) {
       const cat = await this.prisma.category.findFirst({
         where: {
           OR: [
-            { id: category },
-            { name: { contains: category, mode: 'insensitive' } },
-            { slug: { contains: this.toSlug(category), mode: 'insensitive' } },
+            { id: requestedCat },
+            { slug: requestedCat },
+            { name: { equals: requestedCat, mode: 'insensitive' } },
           ],
         },
       });
-      if (cat) gigFields.categoryId = cat.id;
+      if (!cat || !cat.isActive) {
+        throw new BadRequestException('The selected category does not exist or is inactive.');
+      }
+      gigFields.categoryId = cat.id;
     }
 
     const updated = await this.prisma.gig.update({ where: { id: gig.id }, data: gigFields });
