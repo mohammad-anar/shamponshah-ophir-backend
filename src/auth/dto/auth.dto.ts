@@ -19,12 +19,27 @@ export class RegisterDto {
   @ApiPropertyOptional({ example: 'Emily Carter' })
   @IsString()
   @IsOptional()
+  fullName?: string;
+
+  @ApiPropertyOptional({ example: 'Emily Carter' })
+  @IsString()
+  @IsOptional()
   displayName?: string;
 
   @ApiPropertyOptional({ example: 'Party Pulse Events' })
   @IsString()
   @IsOptional()
   businessName?: string;
+
+  @ApiPropertyOptional({ example: '+1 555-123-4567' })
+  @IsString()
+  @IsOptional()
+  phone?: string;
+
+  @ApiPropertyOptional({ description: 'Bot protection honeypot' })
+  @IsString()
+  @IsOptional()
+  website?: string;
 }
 
 export class LoginDto {
