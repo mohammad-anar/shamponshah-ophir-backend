@@ -2,7 +2,7 @@ import { Injectable, NotFoundException, BadRequestException, ForbiddenException,
 import { PrismaService } from '../prisma/prisma.service';
 import { StripeService } from '../stripe/stripe.service';
 import { MessagesGateway } from '../messages/messages.gateway';
-import { CreateOrderDto, ApproveMilestoneDto, DeclineDeliveryDto, SubmitMilestoneDto, CreateReviewDto, CreateDisputeDto, OrderQueryDto, CancelOrderDto, RespondDisputeDto, TransitionOrderDto, RequestRevisionDto, DeliverOrderDto } from './dto/order.dto';
+import { CreateOrderDto, ApproveMilestoneDto, DeclineDeliveryDto, SubmitMilestoneDto, CreateReviewDto, CreateDisputeDto, OrderQueryDto, CancelOrderDto, RespondDisputeDto, TransitionOrderDto, RequestRevisionDto, DeliverOrderDto, RequestCancellationDto, RespondCancellationDto, RequestPartialRefundDto, RespondPartialRefundDto, EscalateToAdminDto, AdminResolveDisputeDto } from './dto/order.dto';
 import { OrderStatus, MilestoneStatus, TransactionType, PaymentStatus, DisputeStatus, NotificationType, Prisma, Role, OrderSource, LedgerStatus, LedgerEntryType } from '@prisma/client';
 import { validateOrderTransition, normalizeOrderStatus, canTransitionOrder, ActorRole } from './order-state-machine';
 
@@ -460,7 +460,13 @@ export class OrdersService implements OnModuleInit, OnModuleDestroy {
         milestones: { orderBy: { sortOrder: 'asc' } },
         transactions: { orderBy: { createdAt: 'desc' } },
         orderReviews: true,
-        disputes: { orderBy: { createdAt: 'desc' }, take: 1 },
+        disputes: {
+          orderBy: { createdAt: 'desc' },
+          include: {
+            disputeMessages: { orderBy: { createdAt: 'asc' } },
+          },
+        },
+        ledgerEntries: { orderBy: { createdAt: 'desc' } },
       },
     });
     if (!order) throw new NotFoundException('Order not found');
@@ -1726,7 +1732,1114 @@ export class OrdersService implements OnModuleInit, OnModuleDestroy {
       failedRefundMilestones: refundResults.filter((item) => item.status === 'FAILED').map((item) => item.milestoneId),
     };
   }
+
+  // ── CANCELLATION REQUEST & RESPONSE ────────────────────────
+
+  async requestCancellation(
+    orderId: string,
+    clientProfileId?: string,
+    dto?: RequestCancellationDto,
+    userId?: string,
+  ) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        milestones: { orderBy: { sortOrder: 'asc' } },
+        clientProfile: true,
+        vendorProfile: true,
+      },
+    });
+
+    if (!order) throw new NotFoundException('Order not found');
+
+    let authorized = false;
+    if (clientProfileId && order.clientProfileId === clientProfileId) {
+      authorized = true;
+    } else if (userId && order.clientProfile?.userId === userId) {
+      authorized = true;
+    } else if (userId) {
+      const userProfile = await this.prisma.clientProfile.findUnique({ where: { userId } });
+      if (userProfile && userProfile.id === order.clientProfileId) authorized = true;
+    }
+
+    if (!authorized) {
+      throw new ForbiddenException('You do not have permission to request cancellation for this order');
+    }
+
+    if ([OrderStatus.COMPLETED, OrderStatus.COMPLETED_WITH_PARTIAL_REFUND as any, OrderStatus.CANCELLED, OrderStatus.REFUNDED as any].includes(order.status as any)) {
+      throw new BadRequestException('Cannot request cancellation on an order that is already completed or closed.');
+    }
+
+    const reason = dto?.reason || 'Client requested cancellation';
+    const proofUrls = dto?.proofUrls || [];
+
+    const updated = await this.prisma.order.update({
+      where: { id: orderId },
+      data: {
+        cancelStatus: 'REQUESTED',
+        cancelReason: reason,
+        cancelProof: proofUrls,
+        cancelRequestedAt: new Date(),
+        deliveryNotes: dto?.notes
+          ? `${order.deliveryNotes || ''} | Cancellation note: ${dto.notes}`
+          : order.deliveryNotes,
+      },
+      include: {
+        clientProfile: true,
+        vendorProfile: true,
+        milestones: true,
+        disputes: true,
+      },
+    });
+
+    const existingDispute = await this.prisma.dispute.findFirst({
+      where: { orderId, status: { in: [DisputeStatus.OPEN, DisputeStatus.UNDER_REVIEW] } },
+    });
+
+    if (!existingDispute) {
+      await this.prisma.dispute.create({
+        data: {
+          orderId,
+          clientProfileId: order.clientProfileId,
+          vendorProfileId: order.vendorProfileId,
+          reason,
+          description: dto?.notes || reason,
+          status: DisputeStatus.OPEN,
+          disputeType: 'CANCEL',
+          evidence: proofUrls.length > 0 ? { proofUrls } : undefined,
+        },
+      });
+    }
+
+    this.messagesGateway.emitToOrder(orderId, 'cancellation_requested', {
+      orderId,
+      reason,
+      proofUrls,
+      cancelRequestedAt: new Date(),
+    });
+    this.messagesGateway.emitToOrder(orderId, 'order_status_updated', {
+      orderId,
+      cancelStatus: 'REQUESTED',
+    });
+
+    if (order.vendorProfile?.userId) {
+      await this.prisma.notification.create({
+        data: {
+          userId: order.vendorProfile.userId,
+          type: NotificationType.GENERAL,
+          title: `Cancellation Request (#${order.orderNumber})`,
+          body: `Client requested cancellation for reason: "${reason}". Please review and respond in your order dashboard.`,
+          link: `/vendor/orders/${order.id}`,
+        },
+      }).catch(() => null);
+    }
+
+    await this.prisma.auditLog.create({
+      data: {
+        userId,
+        action: 'ORDER_CANCEL_REQUESTED',
+        entity: 'ORDER',
+        entityId: order.id,
+        metadata: { reason, notes: dto?.notes, proofUrls },
+      },
+    }).catch(() => null);
+
+    return { success: true, message: 'Cancellation request submitted', order: updated };
+  }
+
+  async respondCancellation(
+    orderId: string,
+    vendorProfileId?: string,
+    dto?: RespondCancellationDto,
+    userId?: string,
+  ) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        milestones: { orderBy: { sortOrder: 'asc' } },
+        clientProfile: true,
+        vendorProfile: true,
+      },
+    });
+
+    if (!order) throw new NotFoundException('Order not found');
+
+    let authorized = false;
+    if (vendorProfileId && order.vendorProfileId === vendorProfileId) {
+      authorized = true;
+    } else if (userId && order.vendorProfile?.userId === userId) {
+      authorized = true;
+    } else if (userId) {
+      const vProfile = await this.prisma.vendorProfile.findFirst({ where: { userId } });
+      if (vProfile && vProfile.id === order.vendorProfileId) authorized = true;
+    }
+
+    if (!authorized) {
+      throw new ForbiddenException('Unauthorized to respond to this cancellation');
+    }
+
+    if (order.cancelStatus !== 'REQUESTED') {
+      throw new BadRequestException('No active cancellation request on this order');
+    }
+
+    if (dto?.action === 'REJECT') {
+      const updated = await this.prisma.order.update({
+        where: { id: orderId },
+        data: {
+          cancelStatus: 'REJECTED',
+          cancelResponseNote: dto?.note || 'Vendor declined cancellation',
+        },
+      });
+
+      this.messagesGateway.emitToOrder(orderId, 'cancellation_rejected', {
+        orderId,
+        note: dto?.note,
+      });
+      this.messagesGateway.emitToOrder(orderId, 'order_status_updated', {
+        orderId,
+        cancelStatus: 'REJECTED',
+      });
+
+      if (order.clientProfile?.userId) {
+        await this.prisma.notification.create({
+          data: {
+            userId: order.clientProfile.userId,
+            type: NotificationType.GENERAL,
+            title: `Cancellation Declined (#${order.orderNumber})`,
+            body: `Vendor declined your cancellation: "${dto?.note || 'No reason provided'}". You can escalate to Admin if needed.`,
+            link: `/user/orders/${order.id}`,
+          },
+        }).catch(() => null);
+      }
+
+      await this.prisma.auditLog.create({
+        data: {
+          userId,
+          action: 'ORDER_CANCEL_REJECTED',
+          entity: 'ORDER',
+          entityId: order.id,
+          metadata: { note: dto?.note },
+        },
+      }).catch(() => null);
+
+      return { success: true, message: 'Cancellation request declined', order: updated };
+    }
+
+    // Action === 'ACCEPT': Process full refund
+    const totalOrderAmount = Number(order.grandTotal);
+    
+    if (order.stripePaymentIntentId) {
+      try {
+        await this.stripe.createRefund({
+          paymentIntentId: order.stripePaymentIntentId,
+          amount: totalOrderAmount,
+          reason: 'requested_by_customer',
+          idempotencyKey: `cancel-accept-${order.id}-${Date.now()}`,
+        });
+      } catch (err: any) {
+        console.error('Stripe refund error during cancel accept:', err?.message || err);
+      }
+    } else {
+      for (const m of order.milestones) {
+        if (m.stripePaymentIntentId) {
+          try {
+            await this.stripe.createRefund({
+              paymentIntentId: m.stripePaymentIntentId,
+              amount: Number(m.amount),
+              idempotencyKey: `cancel-m-accept-${m.id}-${Date.now()}`,
+            });
+          } catch (e: any) {
+            console.error('Milestone refund error:', e?.message || e);
+          }
+        }
+      }
+    }
+
+    const wallet = await this.prisma.vendorWallet.findUnique({
+      where: { vendorProfileId: order.vendorProfileId },
+    });
+    if (wallet) {
+      const pendingDed = Math.min(Number(wallet.pendingAmount), totalOrderAmount * (VENDOR_NET_PERCENT / 100));
+      const releaseDed = Math.min(Number(wallet.pendingForReleaseAmount), totalOrderAmount * (VENDOR_NET_PERCENT / 100));
+      await this.prisma.vendorWallet.update({
+        where: { id: wallet.id },
+        data: {
+          pendingAmount: { decrement: pendingDed },
+          pendingForReleaseAmount: { decrement: releaseDed },
+        },
+      });
+
+      await this.prisma.walletLedgerEntry.create({
+        data: {
+          walletId: wallet.id,
+          vendorProfileId: order.vendorProfileId,
+          orderId: order.id,
+          type: LedgerEntryType.REFUND_DEDUCTION,
+          gross: totalOrderAmount,
+          platformFee: 0,
+          vendorNet: 0,
+          status: LedgerStatus.REFUNDED,
+          description: `Full refund on cancellation accepted by vendor`,
+        },
+      });
+    }
+
+    await this.prisma.milestone.updateMany({
+      where: { orderId: order.id, status: { not: MilestoneStatus.REFUNDED } },
+      data: { status: MilestoneStatus.REFUNDED, note: 'Cancelled and refunded by vendor acceptance' },
+    });
+
+    const updated = await this.prisma.order.update({
+      where: { id: orderId },
+      data: {
+        status: OrderStatus.CANCELLED,
+        cancelStatus: 'ACCEPTED',
+        cancelResponseNote: dto?.note || 'Vendor accepted cancellation and authorized refund',
+        refundedAmount: totalOrderAmount,
+        cancelledAt: new Date(),
+      },
+    });
+
+    await this.prisma.dispute.updateMany({
+      where: { orderId: order.id, status: { in: [DisputeStatus.OPEN, DisputeStatus.UNDER_REVIEW] } },
+      data: {
+        status: DisputeStatus.RESOLVED_CLIENT,
+        resolution: 'Vendor accepted cancellation request. Full refund issued to client.',
+        resolvedAt: new Date(),
+      },
+    });
+
+    this.messagesGateway.emitToOrder(orderId, 'order_status_updated', {
+      orderId,
+      status: OrderStatus.CANCELLED,
+      cancelStatus: 'ACCEPTED',
+    });
+
+    if (order.clientProfile?.userId) {
+      await this.prisma.notification.create({
+        data: {
+          userId: order.clientProfile.userId,
+          type: NotificationType.GENERAL,
+          title: `Cancellation Accepted (#${order.orderNumber})`,
+          body: `Vendor accepted cancellation. A full refund of $${totalOrderAmount.toFixed(2)} has been issued.`,
+          link: `/user/orders/${order.id}`,
+        },
+      }).catch(() => null);
+    }
+
+    await this.prisma.auditLog.create({
+      data: {
+        userId,
+        action: 'ORDER_CANCEL_ACCEPTED',
+        entity: 'ORDER',
+        entityId: order.id,
+        metadata: { totalRefunded: totalOrderAmount, note: dto?.note },
+      },
+    }).catch(() => null);
+
+    return { success: true, message: 'Cancellation accepted and full refund processed', order: updated };
+  }
+
+  // ── PARTIAL REFUND REQUEST & RESPONSE ───────────────────────
+
+  async requestPartialRefund(
+    orderId: string,
+    clientProfileId?: string,
+    dto?: RequestPartialRefundDto,
+    userId?: string,
+  ) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: { clientProfile: true, vendorProfile: true },
+    });
+
+    if (!order) throw new NotFoundException('Order not found');
+
+    let authorized = false;
+    if (clientProfileId && order.clientProfileId === clientProfileId) {
+      authorized = true;
+    } else if (userId && order.clientProfile?.userId === userId) {
+      authorized = true;
+    } else if (userId) {
+      const cProf = await this.prisma.clientProfile.findUnique({ where: { userId } });
+      if (cProf && cProf.id === order.clientProfileId) authorized = true;
+    }
+
+    if (!authorized) {
+      throw new ForbiddenException('Unauthorized to request partial refund on this order');
+    }
+
+    const totalAmount = Number(order.grandTotal);
+    const refundAmount = Number(dto?.amount || 0);
+
+    if (refundAmount <= 0) {
+      throw new BadRequestException('Refund amount must be greater than 0');
+    }
+    if (refundAmount >= totalAmount) {
+      throw new BadRequestException(`Partial refund amount ($${refundAmount}) must be less than the order total ($${totalAmount}). For a full refund, request cancellation.`);
+    }
+
+    const proofUrls = dto?.proofUrls || [];
+    const reason = dto?.reason || 'Client requested partial refund';
+
+    const updated = await this.prisma.order.update({
+      where: { id: orderId },
+      data: {
+        refundStatus: 'REQUESTED',
+        partialRefundAmount: refundAmount,
+        refundReason: reason,
+        refundProof: proofUrls,
+        refundRequestedAt: new Date(),
+        deliveryNotes: dto?.notes
+          ? `${order.deliveryNotes || ''} | Partial refund note: ${dto.notes}`
+          : order.deliveryNotes,
+      },
+    });
+
+    await this.prisma.dispute.create({
+      data: {
+        orderId,
+        clientProfileId: order.clientProfileId,
+        vendorProfileId: order.vendorProfileId,
+        reason,
+        description: dto?.notes || `Requested partial refund of $${refundAmount.toFixed(2)}: ${reason}`,
+        status: DisputeStatus.OPEN,
+        disputeType: 'PARTIAL_REFUND',
+        requestedRefundAmount: refundAmount,
+        evidence: proofUrls.length > 0 ? { proofUrls } : undefined,
+      },
+    });
+
+    this.messagesGateway.emitToOrder(orderId, 'partial_refund_requested', {
+      orderId,
+      amount: refundAmount,
+      reason,
+      proofUrls,
+    });
+    this.messagesGateway.emitToOrder(orderId, 'order_status_updated', {
+      orderId,
+      refundStatus: 'REQUESTED',
+    });
+
+    if (order.vendorProfile?.userId) {
+      await this.prisma.notification.create({
+        data: {
+          userId: order.vendorProfile.userId,
+          type: NotificationType.GENERAL,
+          title: `Partial Refund Request (#${order.orderNumber})`,
+          body: `Client requested a partial refund of $${refundAmount.toFixed(2)}. Reason: "${reason}". Review and respond in your order dashboard.`,
+          link: `/vendor/orders/${order.id}`,
+        },
+      }).catch(() => null);
+    }
+
+    await this.prisma.auditLog.create({
+      data: {
+        userId,
+        action: 'ORDER_PARTIAL_REFUND_REQUESTED',
+        entity: 'ORDER',
+        entityId: order.id,
+        metadata: { amount: refundAmount, reason, proofUrls, notes: dto?.notes },
+      },
+    }).catch(() => null);
+
+    return { success: true, message: 'Partial refund request submitted', order: updated };
+  }
+
+  async respondPartialRefund(
+    orderId: string,
+    vendorProfileId?: string,
+    dto?: RespondPartialRefundDto,
+    userId?: string,
+  ) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        clientProfile: true,
+        vendorProfile: true,
+        milestones: true,
+      },
+    });
+
+    if (!order) throw new NotFoundException('Order not found');
+
+    let authorized = false;
+    if (vendorProfileId && order.vendorProfileId === vendorProfileId) {
+      authorized = true;
+    } else if (userId && order.vendorProfile?.userId === userId) {
+      authorized = true;
+    } else if (userId) {
+      const vProf = await this.prisma.vendorProfile.findFirst({ where: { userId } });
+      if (vProf && vProf.id === order.vendorProfileId) authorized = true;
+    }
+
+    if (!authorized) {
+      throw new ForbiddenException('Unauthorized to respond to partial refund');
+    }
+
+    if (order.refundStatus !== 'REQUESTED') {
+      throw new BadRequestException('No active partial refund request on this order');
+    }
+
+    if (dto?.action === 'REJECT') {
+      const updated = await this.prisma.order.update({
+        where: { id: orderId },
+        data: {
+          refundStatus: 'REJECTED',
+          refundResponseNote: dto?.note || 'Vendor declined partial refund',
+        },
+      });
+
+      this.messagesGateway.emitToOrder(orderId, 'partial_refund_rejected', {
+        orderId,
+        note: dto?.note,
+      });
+      this.messagesGateway.emitToOrder(orderId, 'order_status_updated', {
+        orderId,
+        refundStatus: 'REJECTED',
+      });
+
+      if (order.clientProfile?.userId) {
+        await this.prisma.notification.create({
+          data: {
+            userId: order.clientProfile.userId,
+            type: NotificationType.GENERAL,
+            title: `Partial Refund Declined (#${order.orderNumber})`,
+            body: `Vendor declined your partial refund request: "${dto?.note || 'No reason provided'}". You may escalate this case to Admin.`,
+            link: `/user/orders/${order.id}`,
+          },
+        }).catch(() => null);
+      }
+
+      await this.prisma.auditLog.create({
+        data: {
+          userId,
+          action: 'ORDER_PARTIAL_REFUND_REJECTED',
+          entity: 'ORDER',
+          entityId: order.id,
+          metadata: { note: dto?.note },
+        },
+      }).catch(() => null);
+
+      return { success: true, message: 'Partial refund request declined', order: updated };
+    }
+
+    // Action === 'ACCEPT':
+    // Client gets partial refund back via Stripe
+    // Remaining portion = total - refund
+    // 15% platform fee deducted from remaining portion, 85% goes to vendor
+    // order status = COMPLETED_WITH_PARTIAL_REFUND
+    const refundAmount = Number(order.partialRefundAmount || 0);
+    const totalOrderAmount = Number(order.grandTotal);
+    const remainingPortion = Math.max(0, totalOrderAmount - refundAmount);
+    const platformFee = +(remainingPortion * (PLATFORM_FEE_PERCENT / 100)).toFixed(2);
+    const vendorNet = +(remainingPortion * (VENDOR_NET_PERCENT / 100)).toFixed(2);
+
+    let stripeRefundId: string | undefined;
+    if (order.stripePaymentIntentId) {
+      try {
+        const stripeRefund = await this.stripe.createRefund({
+          paymentIntentId: order.stripePaymentIntentId,
+          amount: refundAmount,
+          reason: 'requested_by_customer',
+          idempotencyKey: `partial-refund-${order.id}-${Date.now()}`,
+        });
+        stripeRefundId = stripeRefund.id;
+      } catch (err: any) {
+        console.error('Stripe partial refund error:', err?.message || err);
+      }
+    } else {
+      for (const m of order.milestones) {
+        if (m.stripePaymentIntentId && refundAmount > 0) {
+          try {
+            const stripeRefund = await this.stripe.createRefund({
+              paymentIntentId: m.stripePaymentIntentId,
+              amount: Math.min(refundAmount, Number(m.amount)),
+              idempotencyKey: `partial-m-refund-${m.id}-${Date.now()}`,
+            });
+            stripeRefundId = stripeRefund.id;
+            break;
+          } catch (e: any) {
+            console.error('Milestone partial refund error:', e?.message || e);
+          }
+        }
+      }
+    }
+
+    const wallet = await this.prisma.vendorWallet.findUnique({
+      where: { vendorProfileId: order.vendorProfileId },
+    });
+    if (wallet) {
+      const priorPending = Math.min(Number(wallet.pendingAmount), totalOrderAmount * (VENDOR_NET_PERCENT / 100));
+      await this.prisma.vendorWallet.update({
+        where: { id: wallet.id },
+        data: {
+          pendingAmount: { decrement: priorPending },
+          availableAmount: { increment: vendorNet },
+          totalEarned: { increment: vendorNet },
+        },
+      });
+
+      await this.prisma.walletLedgerEntry.create({
+        data: {
+          walletId: wallet.id,
+          vendorProfileId: order.vendorProfileId,
+          orderId: order.id,
+          type: LedgerEntryType.REFUND_DEDUCTION,
+          gross: refundAmount,
+          platformFee: 0,
+          vendorNet: 0,
+          status: LedgerStatus.REFUNDED,
+          description: `Partial refund of $${refundAmount.toFixed(2)} returned to client`,
+        },
+      });
+
+      await this.prisma.walletLedgerEntry.create({
+        data: {
+          walletId: wallet.id,
+          vendorProfileId: order.vendorProfileId,
+          orderId: order.id,
+          type: LedgerEntryType.DELIVERY_ACCEPTED,
+          gross: remainingPortion,
+          platformFee: platformFee,
+          vendorNet: vendorNet,
+          status: LedgerStatus.AVAILABLE,
+          description: `Partial settlement: $${vendorNet.toFixed(2)} vendor payout (85% of $${remainingPortion.toFixed(2)} after 15% platform fee)`,
+        },
+      });
+    }
+
+    await this.prisma.transaction.create({
+      data: {
+        txRef: `PARTIAL-REFUND-${order.id}-${Date.now()}`,
+        orderId: order.id,
+        clientProfileId: order.clientProfileId,
+        vendorProfileId: order.vendorProfileId,
+        type: TransactionType.REFUND,
+        amount: refundAmount,
+        fee: 0,
+        net: refundAmount,
+        status: PaymentStatus.SUCCEEDED,
+        stripeId: stripeRefundId,
+        description: `Partial refund accepted by vendor: $${refundAmount.toFixed(2)}`,
+      },
+    }).catch(() => null);
+
+    const updated = await this.prisma.order.update({
+      where: { id: orderId },
+      data: {
+        status: OrderStatus.COMPLETED_WITH_PARTIAL_REFUND as any,
+        refundStatus: 'ACCEPTED',
+        refundResponseNote: dto?.note || 'Vendor accepted partial refund',
+        refundedAmount: refundAmount,
+      },
+    });
+
+    await this.prisma.dispute.updateMany({
+      where: { orderId: order.id, status: { in: [DisputeStatus.OPEN, DisputeStatus.UNDER_REVIEW] } },
+      data: {
+        status: DisputeStatus.RESOLVED_CLIENT,
+        resolution: `Vendor accepted partial refund of $${refundAmount.toFixed(2)}. Remaining $${remainingPortion.toFixed(2)} settled ($${vendorNet.toFixed(2)} vendor payout, $${platformFee.toFixed(2)} platform fee).`,
+        resolvedAt: new Date(),
+      },
+    });
+
+    this.messagesGateway.emitToOrder(orderId, 'order_status_updated', {
+      orderId,
+      status: OrderStatus.COMPLETED_WITH_PARTIAL_REFUND,
+      refundStatus: 'ACCEPTED',
+      refundedAmount: refundAmount,
+      vendorNet,
+    });
+
+    if (order.clientProfile?.userId) {
+      await this.prisma.notification.create({
+        data: {
+          userId: order.clientProfile.userId,
+          type: NotificationType.GENERAL,
+          title: `Partial Refund Accepted (#${order.orderNumber})`,
+          body: `Vendor accepted your partial refund. $${refundAmount.toFixed(2)} has been refunded to your payment method. Order is completed with partial refund.`,
+          link: `/user/orders/${order.id}`,
+        },
+      }).catch(() => null);
+    }
+
+    await this.prisma.auditLog.create({
+      data: {
+        userId,
+        action: 'ORDER_PARTIAL_REFUND_ACCEPTED',
+        entity: 'ORDER',
+        entityId: order.id,
+        metadata: {
+          refundAmount,
+          remainingPortion,
+          platformFee,
+          vendorNet,
+          note: dto?.note,
+        },
+      },
+    }).catch(() => null);
+
+    return {
+      success: true,
+      message: 'Partial refund accepted. Refund sent to client, remainder settled with vendor.',
+      order: updated,
+      settlement: {
+        refundedToClient: refundAmount,
+        remainingPortion,
+        platformFee,
+        vendorNet,
+      },
+    };
+  }
+
+  // ── ESCALATE CASE TO ADMIN ─────────────────────────────────
+
+  async escalateToAdmin(
+    orderId: string,
+    role: Role,
+    profileId?: string,
+    dto?: EscalateToAdminDto,
+    userId?: string,
+  ) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        clientProfile: true,
+        vendorProfile: true,
+      },
+    });
+
+    if (!order) throw new NotFoundException('Order not found');
+
+    const reason = dto?.reason || 'Escalated to admin for arbitration';
+
+    const updated = await this.prisma.order.update({
+      where: { id: orderId },
+      data: {
+        status: OrderStatus.DISPUTED,
+        escalatedToAdmin: true,
+        escalatedAt: new Date(),
+        escalatedBy: role,
+        escalationReason: reason,
+        deliveryNotes: dto?.notes
+          ? `${order.deliveryNotes || ''} | Escalation context: ${dto.notes}`
+          : order.deliveryNotes,
+      },
+      include: {
+        clientProfile: true,
+        vendorProfile: true,
+        milestones: true,
+        disputes: true,
+      },
+    });
+
+    const existingDispute = await this.prisma.dispute.findFirst({
+      where: { orderId },
+      orderBy: { createdAt: 'desc' },
+    });
+
+    if (existingDispute) {
+      await this.prisma.dispute.update({
+        where: { id: existingDispute.id },
+        data: {
+          status: DisputeStatus.UNDER_REVIEW,
+          escalatedToAdmin: true,
+          resolution: `Escalated by ${role}: ${reason}`,
+        },
+      });
+    } else {
+      await this.prisma.dispute.create({
+        data: {
+          orderId,
+          clientProfileId: order.clientProfileId,
+          vendorProfileId: order.vendorProfileId,
+          reason,
+          description: dto?.notes || reason,
+          status: DisputeStatus.UNDER_REVIEW,
+          escalatedToAdmin: true,
+          disputeType: 'ESCALATION',
+        },
+      });
+    }
+
+    this.messagesGateway.emitToOrder(orderId, 'order_escalated_to_admin', {
+      orderId,
+      escalatedBy: role,
+      reason,
+      escalatedAt: new Date(),
+    });
+    this.messagesGateway.emitToOrder(orderId, 'order_status_updated', {
+      orderId,
+      status: OrderStatus.DISPUTED,
+      escalatedToAdmin: true,
+    });
+
+    const targetUserId = role === Role.CLIENT ? order.vendorProfile?.userId : order.clientProfile?.userId;
+    if (targetUserId) {
+      await this.prisma.notification.create({
+        data: {
+          userId: targetUserId,
+          type: NotificationType.GENERAL,
+          title: `Order Escalated to Admin (#${order.orderNumber})`,
+          body: `Order #${order.orderNumber} has been escalated to platform Admin for official dispute resolution. Reason: "${reason}".`,
+          link: role === Role.CLIENT ? `/vendor/orders/${order.id}` : `/user/orders/${order.id}`,
+        },
+      }).catch(() => null);
+    }
+
+    await this.prisma.auditLog.create({
+      data: {
+        userId,
+        action: 'ORDER_ESCALATED_TO_ADMIN',
+        entity: 'ORDER',
+        entityId: order.id,
+        metadata: { escalatedBy: role, reason, notes: dto?.notes },
+      },
+    }).catch(() => null);
+
+    return { success: true, message: 'Case escalated to Admin. A mediator will review evidence and resolve.', order: updated };
+  }
+
+  // ── ADMIN ARBITRATION & DISPUTE RESOLUTION ─────────────────
+
+  async adminResolveDispute(
+    orderId: string,
+    adminId: string,
+    dto: AdminResolveDisputeDto,
+    ipAddress?: string,
+  ) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        clientProfile: true,
+        vendorProfile: true,
+        milestones: true,
+      },
+    });
+
+    if (!order) throw new NotFoundException('Order not found');
+
+    const totalAmount = Number(order.grandTotal);
+    const decision = dto.decision;
+    const note = dto.resolutionNotes || dto.resolutionNote || 'Resolved by admin';
+
+    let finalStatus: OrderStatus = OrderStatus.COMPLETED;
+    let refundedAmount = 0;
+    let vendorNet = 0;
+    let platformFee = 0;
+
+    if (decision === 'CANCEL_FULL_REFUND') {
+      finalStatus = OrderStatus.CANCELLED;
+      refundedAmount = totalAmount;
+
+      if (order.stripePaymentIntentId) {
+        try {
+          await this.stripe.createRefund({
+            paymentIntentId: order.stripePaymentIntentId,
+            amount: totalAmount,
+            reason: 'requested_by_customer',
+            idempotencyKey: `admin-full-refund-${order.id}-${Date.now()}`,
+          });
+        } catch (e: any) {
+          console.error('Admin full refund stripe error:', e?.message || e);
+        }
+      } else {
+        for (const m of order.milestones) {
+          if (m.stripePaymentIntentId) {
+            try {
+              await this.stripe.createRefund({
+                paymentIntentId: m.stripePaymentIntentId,
+                amount: Number(m.amount),
+                idempotencyKey: `admin-m-refund-${m.id}-${Date.now()}`,
+              });
+            } catch (err: any) {
+              console.error('Admin milestone refund error:', err?.message || err);
+            }
+          }
+        }
+      }
+
+      for (const m of order.milestones) {
+        if (m.stripeTransferId) {
+          try {
+            await this.stripe.reverseTransfer(m.stripeTransferId, Number(m.amount));
+          } catch (revErr: any) {
+            console.error('Transfer reversal error:', revErr?.message || revErr);
+          }
+        }
+      }
+
+      const wallet = await this.prisma.vendorWallet.findUnique({ where: { vendorProfileId: order.vendorProfileId } });
+      if (wallet) {
+        const pendingDed = Math.min(Number(wallet.pendingAmount), totalAmount * (VENDOR_NET_PERCENT / 100));
+        const releaseDed = Math.min(Number(wallet.pendingForReleaseAmount), totalAmount * (VENDOR_NET_PERCENT / 100));
+        await this.prisma.vendorWallet.update({
+          where: { id: wallet.id },
+          data: {
+            pendingAmount: { decrement: pendingDed },
+            pendingForReleaseAmount: { decrement: releaseDed },
+          },
+        });
+
+        await this.prisma.walletLedgerEntry.create({
+          data: {
+            walletId: wallet.id,
+            vendorProfileId: order.vendorProfileId,
+            orderId: order.id,
+            type: LedgerEntryType.REFUND_DEDUCTION,
+            gross: totalAmount,
+            platformFee: 0,
+            vendorNet: 0,
+            status: LedgerStatus.REFUNDED,
+            description: `Admin Arbitrated: Full refund issued to client. (${note})`,
+          },
+        });
+      }
+
+      await this.prisma.milestone.updateMany({
+        where: { orderId: order.id },
+        data: { status: MilestoneStatus.REFUNDED, note: `Admin full refund: ${note}` },
+      });
+
+    } else if (decision === 'PARTIAL_REFUND') {
+      finalStatus = OrderStatus.COMPLETED_WITH_PARTIAL_REFUND as any;
+      refundedAmount = Number(dto.partialRefundAmount || order.partialRefundAmount || 0);
+
+      if (refundedAmount <= 0 || refundedAmount >= totalAmount) {
+        throw new BadRequestException(`Partial refund amount ($${refundedAmount}) must be between $0 and $${totalAmount}`);
+      }
+
+      const remainingPortion = Math.max(0, totalAmount - refundedAmount);
+      platformFee = +(remainingPortion * (PLATFORM_FEE_PERCENT / 100)).toFixed(2);
+      vendorNet = +(remainingPortion * (VENDOR_NET_PERCENT / 100)).toFixed(2);
+
+      if (order.stripePaymentIntentId) {
+        try {
+          await this.stripe.createRefund({
+            paymentIntentId: order.stripePaymentIntentId,
+            amount: refundedAmount,
+            reason: 'requested_by_customer',
+            idempotencyKey: `admin-partial-refund-${order.id}-${Date.now()}`,
+          });
+        } catch (e: any) {
+          console.error('Admin partial refund stripe error:', e?.message || e);
+        }
+      }
+
+      const wallet = await this.prisma.vendorWallet.findUnique({ where: { vendorProfileId: order.vendorProfileId } });
+      if (wallet) {
+        const priorPending = Math.min(Number(wallet.pendingAmount), totalAmount * (VENDOR_NET_PERCENT / 100));
+        await this.prisma.vendorWallet.update({
+          where: { id: wallet.id },
+          data: {
+            pendingAmount: { decrement: priorPending },
+            availableAmount: { increment: vendorNet },
+            totalEarned: { increment: vendorNet },
+          },
+        });
+
+        await this.prisma.walletLedgerEntry.create({
+          data: {
+            walletId: wallet.id,
+            vendorProfileId: order.vendorProfileId,
+            orderId: order.id,
+            type: LedgerEntryType.REFUND_DEDUCTION,
+            gross: refundedAmount,
+            platformFee: 0,
+            vendorNet: 0,
+            status: LedgerStatus.REFUNDED,
+            description: `Admin Arbitrated: Partial refund of $${refundedAmount.toFixed(2)} to client`,
+          },
+        });
+
+        await this.prisma.walletLedgerEntry.create({
+          data: {
+            walletId: wallet.id,
+            vendorProfileId: order.vendorProfileId,
+            orderId: order.id,
+            type: LedgerEntryType.DELIVERY_ACCEPTED,
+            gross: remainingPortion,
+            platformFee,
+            vendorNet,
+            status: LedgerStatus.AVAILABLE,
+            description: `Admin Arbitrated: Vendor payout $${vendorNet.toFixed(2)} (85% of $${remainingPortion.toFixed(2)})`,
+          },
+        });
+      }
+
+    } else if (decision === 'REJECT_DISPUTE_RELEASE_VENDOR') {
+      finalStatus = OrderStatus.COMPLETED;
+      platformFee = +(totalAmount * (PLATFORM_FEE_PERCENT / 100)).toFixed(2);
+      vendorNet = +(totalAmount * (VENDOR_NET_PERCENT / 100)).toFixed(2);
+
+      const wallet = await this.prisma.vendorWallet.findUnique({ where: { vendorProfileId: order.vendorProfileId } });
+      if (wallet) {
+        const priorPending = Math.min(Number(wallet.pendingAmount), vendorNet);
+        await this.prisma.vendorWallet.update({
+          where: { id: wallet.id },
+          data: {
+            pendingAmount: { decrement: priorPending },
+            availableAmount: { increment: vendorNet },
+            totalEarned: { increment: vendorNet },
+          },
+        });
+
+        await this.prisma.walletLedgerEntry.create({
+          data: {
+            walletId: wallet.id,
+            vendorProfileId: order.vendorProfileId,
+            orderId: order.id,
+            type: LedgerEntryType.DELIVERY_ACCEPTED,
+            gross: totalAmount,
+            platformFee,
+            vendorNet,
+            status: LedgerStatus.AVAILABLE,
+            description: `Admin Arbitrated: Dispute rejected. Full vendor payout released ($${vendorNet.toFixed(2)})`,
+          },
+        });
+      }
+    }
+
+    const updated = await this.prisma.order.update({
+      where: { id: orderId },
+      data: {
+        status: finalStatus,
+        cancelStatus: decision === 'CANCEL_FULL_REFUND' ? 'ACCEPTED' : 'REJECTED',
+        refundStatus: decision === 'PARTIAL_REFUND' ? 'ACCEPTED' : 'REJECTED',
+        refundedAmount,
+        adminResolution: decision,
+        adminResolvedAt: new Date(),
+        adminResolvedBy: adminId,
+        deliveryNotes: `${order.deliveryNotes || ''} | Admin decision: ${decision}. Note: ${note}`,
+      },
+    });
+
+    const disputeStatus = decision === 'CANCEL_FULL_REFUND'
+      ? DisputeStatus.RESOLVED_CLIENT
+      : decision === 'REJECT_DISPUTE_RELEASE_VENDOR'
+      ? DisputeStatus.RESOLVED_VENDOR
+      : DisputeStatus.RESOLVED_CLIENT;
+
+    await this.prisma.dispute.updateMany({
+      where: { orderId: order.id, status: { in: [DisputeStatus.OPEN, DisputeStatus.UNDER_REVIEW] } },
+      data: {
+        status: disputeStatus,
+        resolution: `Admin Resolution: ${decision}. ${note}`,
+        resolvedAt: new Date(),
+        adminId,
+      },
+    });
+
+    this.messagesGateway.emitToOrder(orderId, 'admin_dispute_resolved', {
+      orderId,
+      decision,
+      resolutionNote: note,
+      status: finalStatus,
+      refundedAmount,
+      vendorNet,
+    });
+    this.messagesGateway.emitToOrder(orderId, 'order_status_updated', {
+      orderId,
+      status: finalStatus,
+    });
+
+    if (order.clientProfile?.userId) {
+      await this.prisma.notification.create({
+        data: {
+          userId: order.clientProfile.userId,
+          type: NotificationType.GENERAL,
+          title: `Admin Resolution: Order #${order.orderNumber}`,
+          body: `Admin resolved the dispute with decision: ${decision}. ${note}`,
+          link: `/user/orders/${order.id}`,
+        },
+      }).catch(() => null);
+    }
+
+    if (order.vendorProfile?.userId) {
+      await this.prisma.notification.create({
+        data: {
+          userId: order.vendorProfile.userId,
+          type: NotificationType.GENERAL,
+          title: `Admin Resolution: Order #${order.orderNumber}`,
+          body: `Admin resolved the dispute with decision: ${decision}. ${note}`,
+          link: `/vendor/orders/${order.id}`,
+        },
+      }).catch(() => null);
+    }
+
+    await this.prisma.auditLog.create({
+      data: {
+        adminId,
+        action: 'ADMIN_RESOLVE_DISPUTE',
+        entity: 'ORDER',
+        entityId: order.id,
+        metadata: {
+          decision,
+          resolutionNote: note,
+          refundedAmount,
+          vendorNet,
+          platformFee,
+        },
+        ipAddress,
+      },
+    }).catch(() => null);
+
+    return {
+      success: true,
+      message: `Dispute resolved successfully: ${decision}`,
+      order: updated,
+      resolution: {
+        decision,
+        refundedAmount,
+        vendorNet,
+        platformFee,
+      },
+    };
+  }
+
+  // ── ADMIN DISPUTES & ESCALATIONS FEED ──────────────────────
+
+  async getAdminDisputesAndEscalations(query?: any) {
+    const orders = await this.prisma.order.findMany({
+      where: {
+        OR: [
+          { escalatedToAdmin: true },
+          { status: OrderStatus.DISPUTED },
+          { cancelStatus: 'REQUESTED' },
+          { refundStatus: 'REQUESTED' },
+          { disputes: { some: { status: { in: [DisputeStatus.OPEN, DisputeStatus.UNDER_REVIEW] } } } },
+        ],
+      },
+      include: {
+        clientProfile: {
+          select: {
+            id: true,
+            displayName: true,
+            avatarUrl: true,
+            user: { select: { email: true } },
+          },
+        },
+        vendorProfile: {
+          select: {
+            id: true,
+            businessName: true,
+            avatarUrl: true,
+            user: { select: { email: true } },
+          },
+        },
+        gig: { select: { title: true } },
+        disputes: {
+          orderBy: { createdAt: 'desc' },
+          include: {
+            disputeMessages: { orderBy: { createdAt: 'asc' } },
+          },
+        },
+        milestones: { orderBy: { sortOrder: 'asc' } },
+      },
+      orderBy: { updatedAt: 'desc' },
+    });
+
+    return orders;
+  }
 }
-
-
-
