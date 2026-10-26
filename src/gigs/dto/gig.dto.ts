@@ -48,3 +48,23 @@ export class GigQueryDto {
   @ApiPropertyOptional() @Type(() => Number) @IsNumber() @IsOptional() page?: number = 1;
   @ApiPropertyOptional() @Type(() => Number) @IsNumber() @IsOptional() limit?: number = 12;
 }
+
+export class ReportGigDto {
+  @ApiProperty({ example: 'Misleading pricing or prohibited service' })
+  @IsString()
+  reason: string;
+
+  @ApiProperty({ example: 'Details about the policy violation or safety issue...' })
+  @IsString()
+  description: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  reporterName?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  reporterEmail?: string;
+}
