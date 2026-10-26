@@ -163,3 +163,97 @@ export class DeliverOrderDto {
   fileUrls?: string[];
 }
 
+export class RequestCancellationDto {
+  @ApiProperty({ description: 'Reason for cancellation request' })
+  @IsString()
+  reason: string;
+
+  @ApiPropertyOptional({ description: 'Detailed notes explaining the request' })
+  @IsString()
+  @IsOptional()
+  notes?: string;
+
+  @ApiPropertyOptional({ description: 'Array of proof URLs or document links' })
+  @IsArray()
+  @IsOptional()
+  proofUrls?: string[];
+}
+
+export class RespondCancellationDto {
+  @ApiProperty({ description: 'Accept or reject the cancellation', enum: ['ACCEPT', 'REJECT'] })
+  @IsString()
+  action: 'ACCEPT' | 'REJECT';
+
+  @ApiPropertyOptional({ description: 'Response note or explanation' })
+  @IsString()
+  @IsOptional()
+  note?: string;
+}
+
+export class RequestPartialRefundDto {
+  @ApiProperty({ description: 'Requested refund amount in USD' })
+  @Type(() => Number)
+  @IsNumber()
+  amount: number;
+
+  @ApiProperty({ description: 'Reason for requesting partial refund' })
+  @IsString()
+  reason: string;
+
+  @ApiPropertyOptional({ description: 'Additional notes' })
+  @IsString()
+  @IsOptional()
+  notes?: string;
+
+  @ApiPropertyOptional({ description: 'Proof files or links' })
+  @IsArray()
+  @IsOptional()
+  proofUrls?: string[];
+}
+
+export class RespondPartialRefundDto {
+  @ApiProperty({ description: 'Accept or reject the partial refund', enum: ['ACCEPT', 'REJECT'] })
+  @IsString()
+  action: 'ACCEPT' | 'REJECT';
+
+  @ApiPropertyOptional({ description: 'Response note or explanation' })
+  @IsString()
+  @IsOptional()
+  note?: string;
+}
+
+export class EscalateToAdminDto {
+  @ApiProperty({ description: 'Reason for escalating case to Admin' })
+  @IsString()
+  reason: string;
+
+  @ApiPropertyOptional({ description: 'Additional context or evidence' })
+  @IsString()
+  @IsOptional()
+  notes?: string;
+}
+
+export class AdminResolveDisputeDto {
+  @ApiProperty({
+    description: 'Admin resolution decision',
+    enum: ['CANCEL_FULL_REFUND', 'PARTIAL_REFUND', 'REJECT_DISPUTE_RELEASE_VENDOR'],
+  })
+  @IsString()
+  decision: 'CANCEL_FULL_REFUND' | 'PARTIAL_REFUND' | 'REJECT_DISPUTE_RELEASE_VENDOR';
+
+  @ApiPropertyOptional({ description: 'Partial refund amount in USD (if decision is PARTIAL_REFUND)' })
+  @Type(() => Number)
+  @IsNumber()
+  @IsOptional()
+  partialRefundAmount?: number;
+
+  @ApiProperty({ description: 'Formal resolution explanation and statement' })
+  @IsString()
+  resolutionNotes: string;
+
+  @ApiPropertyOptional({ description: 'Optional alias for resolution explanation' })
+  @IsString()
+  @IsOptional()
+  resolutionNote?: string;
+}
+
