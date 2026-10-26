@@ -54,4 +54,64 @@ export class AdminQueryDto {
   @IsOptional()
   @IsString()
   search?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  status?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  role?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  type?: string;
+}
+
+export class ApproveGigDto {
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  adminNotes?: string;
+}
+
+export class RejectGigDto {
+  @ApiProperty({ example: 'Misleading pricing tier or insufficient portfolio documentation' })
+  @IsString()
+  reason: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  adminNotes?: string;
+}
+
+export class UpdateGigStatusAdminDto {
+  @ApiProperty({ example: 'ACTIVE' })
+  @IsString()
+  status: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  reason?: string;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  adminNotes?: string;
+}
+
+export class ModerateReportDto {
+  @ApiProperty({ enum: ['SUSPEND_GIG', 'DISMISS', 'RESOLVE'], example: 'SUSPEND_GIG' })
+  @IsString()
+  action: 'SUSPEND_GIG' | 'DISMISS' | 'RESOLVE';
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  adminNotes?: string;
 }
