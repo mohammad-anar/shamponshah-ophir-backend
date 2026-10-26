@@ -5,6 +5,7 @@ import { MessagesGateway } from '../messages/messages.gateway';
 import { CreateOrderDto, ApproveMilestoneDto, DeclineDeliveryDto, SubmitMilestoneDto, CreateReviewDto, CreateDisputeDto, OrderQueryDto, CancelOrderDto, RespondDisputeDto, TransitionOrderDto, RequestRevisionDto, DeliverOrderDto, RequestCancellationDto, RespondCancellationDto, RequestPartialRefundDto, RespondPartialRefundDto, EscalateToAdminDto, AdminResolveDisputeDto } from './dto/order.dto';
 import { OrderStatus, MilestoneStatus, TransactionType, PaymentStatus, DisputeStatus, NotificationType, Prisma, Role, OrderSource, LedgerStatus, LedgerEntryType } from '@prisma/client';
 import { validateOrderTransition, normalizeOrderStatus, canTransitionOrder, ActorRole } from './order-state-machine';
+import { evaluateVendorTier } from '../config/vendor-levels.config';
 
 const PLATFORM_FEE_PERCENT = 15;
 const VENDOR_NET_PERCENT = 85;
@@ -957,6 +958,66 @@ export class OrdersService implements OnModuleInit, OnModuleDestroy {
       clearingEndsAt: clearingEndsAt.toISOString(),
       order: updatedOrder,
     });
+
+    // Auto-evaluate vendor level progression upon order completion via config
+    try {
+      const [compOrders, compSum, allCount, cancelCount] = await Promise.all([
+        this.prisma.order.count({
+          where: { vendorProfileId: order.vendorProfileId, status: OrderStatus.COMPLETED },
+        }),
+        this.prisma.order.aggregate({
+          where: { vendorProfileId: order.vendorProfileId, status: OrderStatus.COMPLETED },
+          _sum: { vendorNet: true },
+        }),
+        this.prisma.order.count({
+          where: { vendorProfileId: order.vendorProfileId },
+        }),
+        this.prisma.order.count({
+          where: { vendorProfileId: order.vendorProfileId, status: OrderStatus.CANCELLED },
+        }),
+      ]);
+
+      const vProf = await this.prisma.vendorProfile.findUnique({
+        where: { id: order.vendorProfileId },
+        select: { tier: true, rating: true, onTimeDeliveryPct: true },
+      });
+
+      if (vProf) {
+        const deliveryRate = (compOrders + cancelCount) > 0
+          ? (compOrders / (compOrders + cancelCount)) * 100
+          : (vProf.onTimeDeliveryPct || 100);
+        const cancelRatio = allCount > 0 ? (cancelCount / allCount) * 100 : 0;
+        const totalEarnings = Number(compSum._sum.vendorNet || 0);
+        const avgRating = Number(vProf.rating) || 5.0;
+
+        const evaluatedTier = evaluateVendorTier({
+          completedOrders: compOrders,
+          totalEarnings,
+          deliveryRate,
+          avgRating,
+          cancelRatio,
+        });
+
+        if (vProf.tier !== evaluatedTier) {
+          await Promise.all([
+            this.prisma.vendorProfile.update({
+              where: { id: order.vendorProfileId },
+              data: { tier: evaluatedTier },
+            }),
+            this.prisma.levelHistory.create({
+              data: {
+                vendorProfileId: order.vendorProfileId,
+                fromTier: vProf.tier,
+                toTier: evaluatedTier,
+                reason: `Level promotion upon completion of order #${order.orderNumber}. Orders: ${compOrders}, Earnings: $${totalEarnings}`,
+              },
+            }),
+          ]);
+        }
+      }
+    } catch {
+      // Non-blocking background evaluation
+    }
 
     // Realtime notification in DB for vendor
     if (order.vendorProfile?.userId) {
