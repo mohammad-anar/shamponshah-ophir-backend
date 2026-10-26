@@ -20,10 +20,25 @@ export class CreateCategoryDto {
   @IsString()
   icon?: string;
 
+  @ApiPropertyOptional({ example: 'https://example.com/cat.jpg' })
+  @IsOptional()
+  @IsString()
+  image?: string;
+
   @ApiPropertyOptional({ example: 0 })
   @IsOptional()
   @IsNumber()
   sortOrder?: number;
+
+  @ApiPropertyOptional({ example: 0 })
+  @IsOptional()
+  @IsNumber()
+  order?: number;
+
+  @ApiPropertyOptional({ example: 'cuid...' })
+  @IsOptional()
+  @IsString()
+  parentId?: string;
 }
 
 export class CreateSubCategoryDto {
@@ -62,10 +77,25 @@ export class UpdateCategoryDto {
   @IsString()
   icon?: string;
 
+  @ApiPropertyOptional({ example: 'https://example.com/cat.jpg' })
+  @IsOptional()
+  @IsString()
+  image?: string;
+
   @ApiPropertyOptional({ example: 0 })
   @IsOptional()
   @IsNumber()
   sortOrder?: number;
+
+  @ApiPropertyOptional({ example: 0 })
+  @IsOptional()
+  @IsNumber()
+  order?: number;
+
+  @ApiPropertyOptional({ example: 'cuid...' })
+  @IsOptional()
+  @IsString()
+  parentId?: string;
 
   @ApiPropertyOptional({ example: true })
   @IsOptional()
