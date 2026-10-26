@@ -14,30 +14,63 @@ export class AuthService {
     private readonly config: ConfigService,
   ) {}
 
-  async register(dto: RegisterDto) {
-    const exists = await this.prisma.user.findUnique({ where: { email: dto.email } });
-    if (exists) throw new ConflictException('Email already registered');
+  private readonly signupRateLimits = new Map<string, { count: number; expiresAt: number }>();
+  private readonly resendRateLimits = new Map<string, { count: number; expiresAt: number }>();
+
+  async register(dto: RegisterDto, ip: string = '127.0.0.1') {
+    // 1. Basic bot honeypot protection
+    if (dto.website && dto.website.trim().length > 0) {
+      throw new BadRequestException('Automated registration rejected.');
+    }
+
+    // 2. IP Rate Limiting (max 5 signups per 15 mins)
+    this.checkRateLimit(this.signupRateLimits, ip, 5, 15 * 60 * 1000, 'Too many signup attempts. Please try again in 15 minutes.');
+
+    // 3. Strict Role Whitelist (CLIENT or VENDOR only - ADMIN never allowed)
+    const normalizedRole = typeof dto.role === 'string' ? (dto.role as string).toUpperCase() : dto.role;
+    if (normalizedRole !== Role.CLIENT && normalizedRole !== Role.VENDOR) {
+      throw new BadRequestException('Invalid registration role. Only CLIENT and VENDOR are permitted.');
+    }
+
+    const exists = await this.prisma.user.findUnique({ where: { email: dto.email.toLowerCase().trim() } });
+    if (exists) throw new ConflictException('An account with this email already exists.');
 
     const passwordHash = await bcrypt.hash(dto.password, 12);
     const emailToken = this.generateToken();
-    console.log(`[AUTH] Registered user ${dto.email} with verification code: ${emailToken}`);
+    console.log(`[AUTH] Registered ${normalizedRole} (${dto.email}) with verification code: ${emailToken}`);
 
     const user = await this.prisma.user.create({
       data: {
-        email: dto.email,
+        email: dto.email.toLowerCase().trim(),
         passwordHash,
-        role: dto.role,
+        role: normalizedRole as Role,
         emailToken,
-        ...(dto.role === Role.CLIENT && {
+        isEmailVerified: false,
+        ...(normalizedRole === Role.CLIENT && {
           clientProfile: {
-            create: { displayName: dto.displayName || dto.email.split('@')[0] },
+            create: {
+              displayName: dto.fullName || dto.displayName || dto.email.split('@')[0],
+              phone: dto.phone,
+            },
           },
         }),
-        ...(dto.role === Role.VENDOR && {
+        ...(normalizedRole === Role.VENDOR && {
           vendorProfile: {
             create: {
-              businessName: dto.businessName || 'My Business',
-              slug: this.toSlug(dto.businessName || dto.email),
+              businessName: dto.businessName || dto.fullName || 'Vendor Studio',
+              slug: this.toSlug(dto.businessName || dto.fullName || dto.email),
+              phone: dto.phone,
+              tier: 'SPROUT',
+              status: VendorStatus.PENDING_APPROVAL,
+              wallet: {
+                create: {
+                  pendingAmount: 0,
+                  pendingForReleaseAmount: 0,
+                  availableAmount: 0,
+                  totalEarned: 0,
+                  totalWithdrawn: 0,
+                },
+              },
             },
           },
         }),
@@ -45,21 +78,33 @@ export class AuthService {
       include: { clientProfile: true, vendorProfile: true },
     });
 
-    const tokens = await this.generateTokens(user.id, user.email, user.role);
-    await this.saveRefreshToken(user.id, tokens.refreshToken);
-
-    return { user: this.sanitize(user), ...tokens };
+    return {
+      message: 'Registration successful. Please verify your email to activate your account.',
+      user: this.sanitize(user),
+      email: user.email,
+      role: user.role,
+    };
   }
 
   async login(dto: LoginDto) {
     const user = await this.prisma.user.findUnique({
-      where: { email: dto.email },
+      where: { email: dto.email.toLowerCase().trim() },
       include: { clientProfile: true, vendorProfile: true },
     });
 
     if (!user) throw new UnauthorizedException('Invalid credentials');
     const valid = await bcrypt.compare(dto.password, user.passwordHash);
     if (!valid) throw new UnauthorizedException('Invalid credentials');
+
+    // Unverified users must verify email to activate account
+    if (!user.isEmailVerified) {
+      throw new UnauthorizedException({
+        message: 'Your email address is not verified. Please verify your email to activate your account.',
+        isEmailVerified: false,
+        email: user.email,
+        role: user.role,
+      });
+    }
 
     const tokens = await this.generateTokens(user.id, user.email, user.role);
     await this.saveRefreshToken(user.id, tokens.refreshToken);
@@ -124,8 +169,8 @@ export class AuthService {
 
   async verifyEmail(token: string) {
     const user = await this.prisma.user.findFirst({
-      where: { emailToken: token },
-      include: { vendorProfile: true },
+      where: { emailToken: token.trim() },
+      include: { vendorProfile: true, clientProfile: true },
     });
     if (!user) throw new BadRequestException('Invalid or expired verification token');
 
@@ -142,11 +187,33 @@ export class AuthService {
       });
     }
 
-    return { message: 'Email verified successfully', role: user.role };
+    const updatedUser = await this.prisma.user.findUnique({
+      where: { id: user.id },
+      include: { clientProfile: true, vendorProfile: true },
+    });
+
+    const tokens = await this.generateTokens(user.id, user.email, user.role);
+    await this.saveRefreshToken(user.id, tokens.refreshToken);
+
+    return {
+      message: 'Email verified successfully. Account is now active.',
+      role: user.role,
+      user: this.sanitize(updatedUser),
+      ...tokens,
+    };
   }
 
-  async resendVerification(email: string) {
-    const user = await this.prisma.user.findUnique({ where: { email } });
+  async resendVerification(email: string, ip: string = '127.0.0.1') {
+    const normalizedEmail = email.toLowerCase().trim();
+    this.checkRateLimit(
+      this.resendRateLimits,
+      `${ip}_${normalizedEmail}`,
+      3,
+      10 * 60 * 1000,
+      'Too many verification email requests. Please wait 10 minutes before trying again.',
+    );
+
+    const user = await this.prisma.user.findUnique({ where: { email: normalizedEmail } });
     if (!user) throw new NotFoundException('User with this email not found');
     if (user.isEmailVerified) {
       return { message: 'Email is already verified', alreadyVerified: true };
@@ -158,7 +225,7 @@ export class AuthService {
       data: { emailToken },
     });
 
-    console.log(`[AUTH] Resent verification code to ${email}: ${emailToken}`);
+    console.log(`[AUTH] Resent verification code to ${normalizedEmail}: ${emailToken}`);
     return { message: 'Verification email sent successfully', token: emailToken };
   }
 
@@ -207,5 +274,24 @@ export class AuthService {
   private sanitize(user: any) {
     const { passwordHash, refreshTokenHash, emailToken, ...safe } = user;
     return safe;
+  }
+
+  private checkRateLimit(
+    map: Map<string, { count: number; expiresAt: number }>,
+    key: string,
+    maxCount: number,
+    windowMs: number,
+    errorMessage: string,
+  ) {
+    const now = Date.now();
+    const entry = map.get(key);
+    if (!entry || now > entry.expiresAt) {
+      map.set(key, { count: 1, expiresAt: now + windowMs });
+      return;
+    }
+    if (entry.count >= maxCount) {
+      throw new BadRequestException(errorMessage);
+    }
+    entry.count += 1;
   }
 }
