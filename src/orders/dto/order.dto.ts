@@ -23,6 +23,15 @@ export class CreateOrderDto {
 
   @ApiPropertyOptional({ description: 'Add-ons JSON array' })
   @IsOptional() addonsJson?: any;
+
+  @ApiPropertyOptional({ description: 'Order source: GIG or JOB' })
+  @IsString() @IsOptional() source?: 'GIG' | 'JOB';
+
+  @ApiPropertyOptional({ description: 'Explicit total order amount' })
+  @IsOptional() amount?: any;
+
+  @ApiPropertyOptional({ description: 'Unique idempotency key for this order creation request' })
+  @IsString() @IsOptional() idempotencyKey?: string;
 }
 
 export class ApproveMilestoneDto {
@@ -120,5 +129,37 @@ export class OrderQueryDto {
   @IsNumber()
   @IsOptional()
   limit?: number = 10;
+}
+
+export class TransitionOrderDto {
+  @ApiProperty({ description: 'Target order status according to the state machine' })
+  @IsString()
+  status: string;
+
+  @ApiPropertyOptional({ description: 'Optional explanation or notes for the transition' })
+  @IsString()
+  @IsOptional()
+  reason?: string;
+}
+
+export class RequestRevisionDto {
+  @ApiProperty({ description: 'Specific feedback and reason for requesting a revision' })
+  @IsString()
+  reason: string;
+
+  @ApiPropertyOptional({ description: 'Additional notes or requirements' })
+  @IsString()
+  @IsOptional()
+  notes?: string;
+}
+
+export class DeliverOrderDto {
+  @ApiProperty({ description: 'Fulfillment summary and delivery message' })
+  @IsString()
+  message: string;
+
+  @ApiPropertyOptional({ description: 'Array of pre-uploaded file URLs' })
+  @IsOptional()
+  fileUrls?: string[];
 }
 
