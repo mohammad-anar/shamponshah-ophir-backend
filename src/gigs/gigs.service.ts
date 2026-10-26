@@ -3,6 +3,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
 import { CreateGigDto, UpdateGigDto, CreateGigPackageDto, GigQueryDto, ReportGigDto } from './dto/gig.dto';
 import { GigStatus, ReportStatus } from '@prisma/client';
+import { calculateGigBaseScore, applySessionSeededRanking } from '../ranking/ranking.engine';
 
 @Injectable()
 export class GigsService {
@@ -145,7 +146,7 @@ export class GigsService {
     const cached = await this.redis.getJson<any>(cacheKey);
     if (cached) return cached;
 
-    const { page = 1, limit = 12, search, categoryId, minPrice, maxPrice } = query;
+    const { page = 1, limit = 12, search, categoryId, minPrice, maxPrice, seed, sortBy } = query;
     const skip = (page - 1) * limit;
 
     const where: any = { status: GigStatus.ACTIVE };
@@ -162,24 +163,61 @@ export class GigsService {
       };
     }
 
-    const [data, total] = await Promise.all([
-      this.prisma.gig.findMany({
-        where,
-        skip,
-        take: limit,
-        include: {
-          vendorProfile: { select: { businessName: true, slug: true, rating: true, avatarUrl: true, tier: true } },
-          category: { select: { name: true, slug: true } },
-          packages: { orderBy: { sortOrder: 'asc' }, take: 1 },
-          gallery: { orderBy: { sortOrder: 'asc' } },
-          _count: { select: { gigReviews: true } },
+    const allMatchingGigs = await this.prisma.gig.findMany({
+      where,
+      include: {
+        vendorProfile: {
+          select: {
+            businessName: true,
+            slug: true,
+            rating: true,
+            avatarUrl: true,
+            tier: true,
+            onTimeDeliveryPct: true,
+            ordersCompleted: true,
+          },
         },
-        orderBy: [{ createdAt: 'desc' }, { orderCount: 'desc' }],
-      }),
-      this.prisma.gig.count({ where }),
-    ]);
+        category: { select: { name: true, slug: true } },
+        packages: { orderBy: { sortOrder: 'asc' }, take: 1 },
+        gallery: { orderBy: { sortOrder: 'asc' } },
+        _count: { select: { gigReviews: true } },
+      },
+    });
 
-    const result = { data, total, page, limit, totalPages: Math.ceil(total / limit) };
+    const total = allMatchingGigs.length;
+
+    // Apply ranking engine or explicit sort
+    let rankedGigs = allMatchingGigs;
+
+    if (sortBy === 'price_asc') {
+      rankedGigs.sort((a, b) => Number(a.packages?.[0]?.price || 0) - Number(b.packages?.[0]?.price || 0));
+    } else if (sortBy === 'price_desc') {
+      rankedGigs.sort((a, b) => Number(b.packages?.[0]?.price || 0) - Number(a.packages?.[0]?.price || 0));
+    } else if (sortBy === 'rating') {
+      rankedGigs.sort((a, b) => Number(b.vendorProfile?.rating || 0) - Number(a.vendorProfile?.rating || 0));
+    } else if (sortBy === 'orders') {
+      rankedGigs.sort((a, b) => Number(b.orderCount || 0) - Number(a.orderCount || 0));
+    } else {
+      // Default view: Fair ranking engine with cold-start boost + deterministic session-based shuffle
+      const sessionSeed = seed || 'session_default';
+      rankedGigs = applySessionSeededRanking(
+        allMatchingGigs,
+        (g) =>
+          calculateGigBaseScore({
+            id: g.id,
+            orderCount: g.orderCount,
+            clickCount: g.clickCount,
+            viewCount: g.viewCount,
+            createdAt: g.createdAt,
+            vendorProfile: g.vendorProfile || {},
+          }),
+        sessionSeed,
+        24, // +/- 12 points jitter
+      );
+    }
+
+    const pagedData = rankedGigs.slice(skip, skip + limit);
+    const result = { data: pagedData, total, page, limit, totalPages: Math.ceil(total / limit) };
     await this.redis.setJson(cacheKey, result, this.CACHE_TTL);
     return result;
   }
