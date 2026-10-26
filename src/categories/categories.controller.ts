@@ -18,6 +18,15 @@ export class CategoriesController {
     return this.categoriesService.findAll();
   }
 
+  @Get('admin/all')
+  @ApiBearerAuth()
+  @UseGuards(JwtAuthGuard, RolesGuard)
+  @Roles(Role.ADMIN)
+  @ApiOperation({ summary: 'Get all categories including inactive ones for Admin management' })
+  findAllForAdmin() {
+    return this.categoriesService.findAllForAdmin();
+  }
+
   @Get(':slug')
   @ApiOperation({ summary: 'Get category detail by slug with gigs (Public)' })
   findBySlug(@Param('slug') slug: string) {
