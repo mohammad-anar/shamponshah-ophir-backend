@@ -2,8 +2,18 @@ import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { RedisService } from '../redis/redis.service';
-import { UpdateVendorStatusDto, UpdateLevelRuleDto, AdminQueryDto } from './dto/admin.dto';
-import { VendorStatus, OrderStatus, NotificationType, VendorTier, JobStatus, OfferStatus } from '@prisma/client';
+import { UpdateVendorStatusDto, UpdateLevelRuleDto, AdminQueryDto, ApproveGigDto, RejectGigDto, ModerateReportDto } from './dto/admin.dto';
+import {
+  VendorStatus,
+  OrderStatus,
+  NotificationType,
+  VendorTier,
+  JobStatus,
+  OfferStatus,
+  GigStatus,
+  ReportStatus,
+  DisputeStatus,
+} from '@prisma/client';
 
 @Injectable()
 export class AdminService {
@@ -26,6 +36,13 @@ export class AdminService {
       activeOrdersCount,
       activeGigsCount,
       openJobsCount,
+      pendingGigsCount,
+      pendingReportsCount,
+      pendingApprovalsCount,
+      openDisputesCount,
+      totalOrdersCount,
+      totalOffersCount,
+      totalUsersCount,
     ] = await Promise.all([
       this.prisma.order.aggregate({
         where: { status: { in: [OrderStatus.ACTIVE, OrderStatus.IN_PROGRESS, OrderStatus.COMPLETED] } },
@@ -42,8 +59,21 @@ export class AdminService {
       this.prisma.clientProfile.count(),
       this.prisma.vendorProfile.count(),
       this.prisma.order.count({ where: { status: { in: [OrderStatus.ACTIVE, OrderStatus.IN_PROGRESS] } } }),
-      this.prisma.gig.count({ where: { status: 'ACTIVE' } }),
+      this.prisma.gig.count({ where: { status: GigStatus.ACTIVE } }),
       this.prisma.job.count({ where: { status: 'OPEN' } }),
+      this.prisma.gig.count({ where: { status: GigStatus.PENDING_VERIFICATION } }),
+      this.prisma.gigReport.count({ where: { status: ReportStatus.PENDING } }),
+      this.prisma.vendorProfile.count({ where: { status: VendorStatus.PENDING_APPROVAL } }),
+      this.prisma.dispute.count({
+        where: {
+          status: {
+            notIn: [DisputeStatus.CLOSED, DisputeStatus.RESOLVED_CLIENT, DisputeStatus.RESOLVED_VENDOR],
+          },
+        },
+      }),
+      this.prisma.order.count(),
+      this.prisma.offer.count(),
+      this.prisma.user.count(),
     ]);
 
     return {
@@ -55,6 +85,13 @@ export class AdminService {
       activeOrders: activeOrdersCount,
       activeGigs: activeGigsCount,
       openJobs: openJobsCount,
+      pendingGigs: pendingGigsCount,
+      pendingReports: pendingReportsCount,
+      pendingApprovals: pendingApprovalsCount,
+      openDisputes: openDisputesCount,
+      totalOrders: totalOrdersCount,
+      totalOffers: totalOffersCount,
+      totalUsers: totalUsersCount,
     };
   }
 
@@ -411,34 +448,512 @@ export class AdminService {
     });
   }
 
-  // ── Gigs & Jobs oversight ──────────────────────────────────
+  // ── Gigs & Moderation Oversight ────────────────────────────
   async getAllGigs(query: AdminQueryDto) {
     const page = Math.max(1, Number(query.page) || 1);
     const limit = Math.min(50, Math.max(1, Number(query.limit) || 20));
     const skip = (page - 1) * limit;
 
+    const where: any = {};
+    if (query.status && query.status !== 'ALL') {
+      where.status = query.status as GigStatus;
+    }
+    if (query.search) {
+      where.OR = [
+        { title: { contains: query.search, mode: 'insensitive' } },
+        { vendorProfile: { businessName: { contains: query.search, mode: 'insensitive' } } },
+        { category: { name: { contains: query.search, mode: 'insensitive' } } },
+      ];
+    }
+
     const [gigs, total] = await Promise.all([
       this.prisma.gig.findMany({
+        where,
         include: {
-          vendorProfile: { select: { businessName: true } },
-          category: { select: { name: true } },
-          packages: true,
+          vendorProfile: {
+            select: {
+              id: true,
+              businessName: true,
+              slug: true,
+              avatarUrl: true,
+              rating: true,
+              tier: true,
+              user: { select: { email: true } },
+            },
+          },
+          category: { select: { id: true, name: true, slug: true } },
+          packages: { orderBy: { sortOrder: 'asc' } },
+          gallery: { orderBy: { sortOrder: 'asc' } },
+          _count: { select: { orders: true, reports: true } },
         },
         orderBy: { createdAt: 'desc' },
         skip,
         take: limit,
       }),
-      this.prisma.gig.count(),
+      this.prisma.gig.count({ where }),
     ]);
 
     return { data: gigs, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } };
   }
 
-  async updateGigStatus(gigId: string, status: any) {
-    return this.prisma.gig.update({
-      where: { id: gigId },
-      data: { status },
+  async getPendingGigs(query: AdminQueryDto) {
+    const page = Math.max(1, Number(query.page) || 1);
+    const limit = Math.min(50, Math.max(1, Number(query.limit) || 20));
+    const skip = (page - 1) * limit;
+
+    const where: any = { status: GigStatus.PENDING_VERIFICATION };
+    if (query.search) {
+      where.OR = [
+        { title: { contains: query.search, mode: 'insensitive' } },
+        { vendorProfile: { businessName: { contains: query.search, mode: 'insensitive' } } },
+        { category: { name: { contains: query.search, mode: 'insensitive' } } },
+      ];
+    }
+
+    const [gigs, total] = await Promise.all([
+      this.prisma.gig.findMany({
+        where,
+        include: {
+          vendorProfile: {
+            select: {
+              id: true,
+              businessName: true,
+              slug: true,
+              avatarUrl: true,
+              rating: true,
+              tier: true,
+              user: { select: { email: true, createdAt: true } },
+            },
+          },
+          category: { select: { id: true, name: true, slug: true } },
+          packages: { orderBy: { sortOrder: 'asc' } },
+          gallery: { orderBy: { sortOrder: 'asc' } },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.gig.count({ where }),
+    ]);
+
+    return { data: gigs, pagination: { page, limit, total, totalPages: Math.ceil(total / limit) } };
+  }
+
+  async approveGig(gigId: string, adminId?: string, adminNotes?: string) {
+    const gig = await this.prisma.gig.findFirst({
+      where: { OR: [{ id: gigId }, { slug: gigId }] },
+      include: { vendorProfile: true },
     });
+    if (!gig) throw new NotFoundException('Service gig not found');
+
+    const updated = await this.prisma.gig.update({
+      where: { id: gig.id },
+      data: {
+        status: GigStatus.ACTIVE,
+        rejectionReason: null,
+        adminNotes: adminNotes || null,
+        adminReviewedAt: new Date(),
+        adminReviewedById: adminId || null,
+      },
+    });
+
+    await this.redis.delPattern('gigs:list:*');
+    await this.redis.del(`gig:${gig.slug}`);
+
+    if (gig.vendorProfile?.userId) {
+      await this.notifications.createNotification({
+        userId: gig.vendorProfile.userId,
+        type: NotificationType.GENERAL,
+        title: 'Gig Approved! 🎉',
+        body: `Congratulations! Your service listing "${gig.title}" has been verified and is now live on the marketplace.`,
+        link: `/services/${gig.slug}`,
+      });
+    }
+
+    await this.prisma.auditLog.create({
+      data: {
+        adminId: adminId || null,
+        action: 'GIG_APPROVED',
+        entity: 'Gig',
+        entityId: gig.id,
+        metadata: { title: gig.title, vendorProfileId: gig.vendorProfileId },
+      },
+    });
+
+    return updated;
+  }
+
+  async rejectGig(gigId: string, reason: string, adminId?: string, adminNotes?: string) {
+    const gig = await this.prisma.gig.findFirst({
+      where: { OR: [{ id: gigId }, { slug: gigId }] },
+      include: { vendorProfile: true },
+    });
+    if (!gig) throw new NotFoundException('Service gig not found');
+
+    const updated = await this.prisma.gig.update({
+      where: { id: gig.id },
+      data: {
+        status: GigStatus.REJECTED,
+        rejectionReason: reason,
+        adminNotes: adminNotes || null,
+        adminReviewedAt: new Date(),
+        adminReviewedById: adminId || null,
+      },
+    });
+
+    await this.redis.delPattern('gigs:list:*');
+    await this.redis.del(`gig:${gig.slug}`);
+
+    if (gig.vendorProfile?.userId) {
+      await this.notifications.createNotification({
+        userId: gig.vendorProfile.userId,
+        type: NotificationType.GENERAL,
+        title: 'Gig Needs Revisions',
+        body: `Your service listing "${gig.title}" was not approved. Reason: ${reason}. You may edit and resubmit.`,
+        link: `/vendor/gigs`,
+      });
+    }
+
+    await this.prisma.auditLog.create({
+      data: {
+        adminId: adminId || null,
+        action: 'GIG_REJECTED',
+        entity: 'Gig',
+        entityId: gig.id,
+        metadata: { title: gig.title, reason, adminNotes },
+      },
+    });
+
+    return updated;
+  }
+
+  async suspendGig(gigId: string, reason?: string, adminId?: string) {
+    const gig = await this.prisma.gig.findFirst({
+      where: { OR: [{ id: gigId }, { slug: gigId }] },
+      include: { vendorProfile: true },
+    });
+    if (!gig) throw new NotFoundException('Service gig not found');
+
+    const updated = await this.prisma.gig.update({
+      where: { id: gig.id },
+      data: {
+        status: GigStatus.SUSPENDED,
+        rejectionReason: reason || 'Suspended by Administrator',
+        adminReviewedAt: new Date(),
+        adminReviewedById: adminId || null,
+      },
+    });
+
+    await this.redis.delPattern('gigs:list:*');
+    await this.redis.del(`gig:${gig.slug}`);
+
+    if (gig.vendorProfile?.userId) {
+      await this.notifications.createNotification({
+        userId: gig.vendorProfile.userId,
+        type: NotificationType.GENERAL,
+        title: 'Gig Listing Suspended',
+        body: `Your service listing "${gig.title}" has been suspended from the marketplace. Reason: ${reason || 'Terms & Policy violation.'}`,
+        link: `/vendor/gigs`,
+      });
+    }
+
+    await this.prisma.auditLog.create({
+      data: {
+        adminId: adminId || null,
+        action: 'GIG_SUSPENDED',
+        entity: 'Gig',
+        entityId: gig.id,
+        metadata: { title: gig.title, reason },
+      },
+    });
+
+    return updated;
+  }
+
+  async updateGigStatus(gigId: string, status: any, reason?: string, adminNotes?: string) {
+    const gig = await this.prisma.gig.findUnique({ where: { id: gigId } });
+    if (!gig) throw new NotFoundException('Gig not found');
+
+    const updateData: any = { status };
+    if (reason) updateData.rejectionReason = reason;
+    if (adminNotes) updateData.adminNotes = adminNotes;
+    if (status === GigStatus.ACTIVE) updateData.rejectionReason = null;
+
+    const updated = await this.prisma.gig.update({
+      where: { id: gigId },
+      data: updateData,
+    });
+
+    await this.redis.delPattern('gigs:list:*');
+    await this.redis.del(`gig:${gig.slug}`);
+
+    return updated;
+  }
+
+  // ── Reports Moderation ──────────────────────────────────────
+  async getAllReports(query: AdminQueryDto) {
+    const page = Math.max(1, Number(query.page) || 1);
+    const limit = Math.min(50, Math.max(1, Number(query.limit) || 20));
+    const skip = (page - 1) * limit;
+
+    const where: any = {};
+    if (query.status && query.status !== 'ALL') {
+      where.status = query.status as ReportStatus;
+    }
+    if (query.search) {
+      where.OR = [
+        { reason: { contains: query.search, mode: 'insensitive' } },
+        { description: { contains: query.search, mode: 'insensitive' } },
+        { reporterName: { contains: query.search, mode: 'insensitive' } },
+        { reporterEmail: { contains: query.search, mode: 'insensitive' } },
+        { gig: { title: { contains: query.search, mode: 'insensitive' } } },
+      ];
+    }
+
+    const [reports, total] = await Promise.all([
+      this.prisma.gigReport.findMany({
+        where,
+        include: {
+          gig: {
+            select: {
+              id: true,
+              title: true,
+              slug: true,
+              status: true,
+              gallery: { select: { url: true }, take: 1 },
+              packages: { select: { price: true, title: true }, take: 1 },
+              vendorProfile: {
+                select: {
+                  id: true,
+                  businessName: true,
+                  slug: true,
+                  avatarUrl: true,
+                  user: { select: { email: true } },
+                },
+              },
+            },
+          },
+          reporter: {
+            select: {
+              id: true,
+              email: true,
+              role: true,
+              clientProfile: { select: { displayName: true } },
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.gigReport.count({ where }),
+    ]);
+
+    return {
+      data: reports,
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    };
+  }
+
+  async moderateReport(
+    reportId: string,
+    action: 'SUSPEND_GIG' | 'DISMISS' | 'RESOLVE',
+    adminNotes?: string,
+    adminId?: string,
+  ) {
+    const report = await this.prisma.gigReport.findUnique({
+      where: { id: reportId },
+      include: { gig: true },
+    });
+    if (!report) throw new NotFoundException('Report not found');
+
+    if (action === 'SUSPEND_GIG') {
+      await this.suspendGig(
+        report.gigId,
+        adminNotes || `Suspended following community report: ${report.reason}`,
+        adminId,
+      );
+
+      return this.prisma.gigReport.update({
+        where: { id: reportId },
+        data: {
+          status: ReportStatus.RESOLVED,
+          actionTaken: 'GIG_SUSPENDED',
+          adminNotes: adminNotes || null,
+          resolvedAt: new Date(),
+          resolvedById: adminId || null,
+        },
+      });
+    }
+
+    if (action === 'DISMISS') {
+      return this.prisma.gigReport.update({
+        where: { id: reportId },
+        data: {
+          status: ReportStatus.DISMISSED,
+          actionTaken: 'DISMISSED',
+          adminNotes: adminNotes || null,
+          resolvedAt: new Date(),
+          resolvedById: adminId || null,
+        },
+      });
+    }
+
+    return this.prisma.gigReport.update({
+      where: { id: reportId },
+      data: {
+        status: ReportStatus.RESOLVED,
+        actionTaken: 'RESOLVED',
+        adminNotes: adminNotes || null,
+        resolvedAt: new Date(),
+        resolvedById: adminId || null,
+      },
+    });
+  }
+
+  // ── Financial Transactions & Wallets ─────────────────────────
+  async getAllTransactions(query: AdminQueryDto) {
+    const page = Math.max(1, Number(query.page) || 1);
+    const limit = Math.min(50, Math.max(1, Number(query.limit) || 20));
+    const skip = (page - 1) * limit;
+
+    const where: any = {};
+    if (query.status && query.status !== 'ALL') {
+      where.status = query.status as any;
+    }
+    if (query.type) {
+      where.type = query.type as any;
+    }
+    if (query.search) {
+      where.OR = [
+        { txRef: { contains: query.search, mode: 'insensitive' } },
+        { stripeId: { contains: query.search, mode: 'insensitive' } },
+        { description: { contains: query.search, mode: 'insensitive' } },
+      ];
+    }
+
+    const [transactions, total] = await Promise.all([
+      this.prisma.transaction.findMany({
+        where,
+        include: {
+          order: {
+            select: {
+              id: true,
+              orderNumber: true,
+              clientProfile: { select: { displayName: true } },
+              vendorProfile: { select: { businessName: true } },
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.transaction.count({ where }),
+    ]);
+
+    return {
+      data: transactions,
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    };
+  }
+
+  async getAllWallets(query: AdminQueryDto) {
+    const page = Math.max(1, Number(query.page) || 1);
+    const limit = Math.min(50, Math.max(1, Number(query.limit) || 20));
+    const skip = (page - 1) * limit;
+
+    const where: any = {};
+    if (query.search) {
+      where.vendorProfile = {
+        OR: [
+          { businessName: { contains: query.search, mode: 'insensitive' } },
+          { slug: { contains: query.search, mode: 'insensitive' } },
+          { user: { email: { contains: query.search, mode: 'insensitive' } } },
+        ],
+      };
+    }
+
+    const [wallets, total] = await Promise.all([
+      this.prisma.vendorWallet.findMany({
+        where,
+        include: {
+          vendorProfile: {
+            select: {
+              id: true,
+              businessName: true,
+              slug: true,
+              avatarUrl: true,
+              tier: true,
+              user: { select: { email: true } },
+            },
+          },
+        },
+        orderBy: { totalEarned: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.vendorWallet.count({ where }),
+    ]);
+
+    return {
+      data: wallets,
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    };
+  }
+
+  async getAllOffers(query: AdminQueryDto) {
+    const page = Math.max(1, Number(query.page) || 1);
+    const limit = Math.min(50, Math.max(1, Number(query.limit) || 20));
+    const skip = (page - 1) * limit;
+
+    const where: any = {};
+    if (query.status && query.status !== 'ALL') {
+      where.status = query.status as OfferStatus;
+    }
+    if (query.search) {
+      where.OR = [
+        { proposal: { contains: query.search, mode: 'insensitive' } },
+        { job: { title: { contains: query.search, mode: 'insensitive' } } },
+        { vendorProfile: { businessName: { contains: query.search, mode: 'insensitive' } } },
+      ];
+    }
+
+    const [offers, total] = await Promise.all([
+      this.prisma.offer.findMany({
+        where,
+        include: {
+          vendorProfile: {
+            select: {
+              id: true,
+              businessName: true,
+              slug: true,
+              avatarUrl: true,
+              rating: true,
+              tier: true,
+            },
+          },
+          job: {
+            select: {
+              id: true,
+              title: true,
+              budget: true,
+              status: true,
+              clientProfile: { select: { displayName: true } },
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        skip,
+        take: limit,
+      }),
+      this.prisma.offer.count({ where }),
+    ]);
+
+    return {
+      data: offers,
+      pagination: { page, limit, total, totalPages: Math.ceil(total / limit) },
+    };
   }
 
   async getAllJobs(query: AdminQueryDto) {
