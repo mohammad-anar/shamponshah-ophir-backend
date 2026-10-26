@@ -1,14 +1,28 @@
 import { Injectable, NotFoundException, ForbiddenException, BadRequestException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
-import { CreateJobDto, UpdateJobDto, CreateOfferDto, JobQueryDto } from './dto/job.dto';
-import { JobStatus, OfferStatus, OrderStatus, MilestoneStatus, NotificationType, Prisma } from '@prisma/client';
+import { CreateJobDto, UpdateJobDto, CreateOfferDto, JobQueryDto, AcceptOfferDto } from './dto/job.dto';
+import {
+  JobStatus,
+  OfferStatus,
+  OrderStatus,
+  MilestoneStatus,
+  NotificationType,
+  Prisma,
+  OrderSource,
+  LedgerStatus,
+  LedgerEntryType,
+  TransactionType,
+  PaymentStatus,
+} from '@prisma/client';
+import { StripeService } from '../stripe/stripe.service';
 
 @Injectable()
 export class JobsService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
+    private readonly stripe: StripeService,
   ) {}
 
   // ── CLIENT: Post a Job ─────────────────────────────────────
@@ -350,7 +364,13 @@ export class JobsService {
     };
   }
 
-  async acceptOffer(jobId: string, offerId: string, clientProfileId?: string, userId?: string) {
+  async acceptOffer(
+    jobId: string,
+    offerId: string,
+    clientProfileId?: string,
+    userId?: string,
+    paymentMethodId?: string,
+  ) {
     const job = await this.assertJobOwner(jobId, clientProfileId, userId);
     if (job.status !== JobStatus.OPEN && job.status !== JobStatus.AWARDED) {
       throw new BadRequestException('Job is not open for offers');
@@ -361,138 +381,230 @@ export class JobsService {
       include: { vendorProfile: true },
     });
     if (!offer) throw new NotFoundException('Offer not found');
+    if (offer.status !== OfferStatus.PENDING) {
+      throw new BadRequestException(`Offer is already ${offer.status.toLowerCase()}`);
+    }
 
-    // 1. Accept selected offer, decline / reject all other offers for this job
-    await this.prisma.$transaction([
-      this.prisma.offer.update({
+    // Resolve client profile
+    let resolvedClientProfileId = clientProfileId || job.clientProfileId;
+    let client = await this.prisma.clientProfile.findUnique({
+      where: { id: resolvedClientProfileId },
+      include: { user: true },
+    });
+    if (!client && userId) {
+      client = await this.prisma.clientProfile.findUnique({
+        where: { userId },
+        include: { user: true },
+      });
+      if (client) resolvedClientProfileId = client.id;
+    }
+    if (!client) throw new NotFoundException('Client profile not found');
+
+    // ── Check client's saved payment method ──
+    const savedCard = paymentMethodId
+      ? await this.prisma.paymentMethod.findFirst({
+          where: { clientProfileId: client.id, stripePaymentMethodId: paymentMethodId },
+        })
+      : (await this.prisma.paymentMethod.findFirst({
+          where: { clientProfileId: client.id, isDefault: true },
+        })) ||
+        (await this.prisma.paymentMethod.findFirst({
+          where: { clientProfileId: client.id },
+          orderBy: { createdAt: 'desc' },
+        }));
+
+    if (!savedCard || !savedCard.stripePaymentMethodId) {
+      throw new BadRequestException(
+        'Please add a saved payment method to your account before accepting an offer. Your card will be charged immediately upon accepting the offer.',
+      );
+    }
+
+    let customerId = client.stripeCustomerId;
+    if (!customerId) {
+      const stripeCustomer = await this.stripe.createCustomer(
+        client.user?.email || 'client@ophir.local',
+        client.displayName,
+      );
+      customerId = stripeCustomer.id;
+      await this.prisma.clientProfile.update({
+        where: { id: client.id },
+        data: { stripeCustomerId: customerId },
+      });
+    }
+
+    // ── Amount & Fee Calculation (15% platform fee, 85% vendor net) ──
+    const subtotal = new Prisma.Decimal(offer.price);
+    const platformFee = subtotal.mul(0.15).toDecimalPlaces(2);
+    const vendorNet = subtotal.mul(0.85).toDecimalPlaces(2);
+    const grandTotal = subtotal.add(platformFee);
+    const orderNumber = `JB-${Date.now().toString().slice(-6)}`;
+
+    // ── Off-session Stripe Charge ──
+    let pi: any;
+    try {
+      pi = await this.stripe.createOffSessionOrderPaymentIntent({
+        amount: Number(grandTotal),
+        customerId,
+        paymentMethodId: savedCard.stripePaymentMethodId,
+        transferGroup: orderNumber,
+        metadata: {
+          jobId,
+          offerId,
+          clientId: client.id,
+          vendorProfileId: offer.vendorProfileId,
+          orderNumber,
+          type: 'JOB_OFFER_ESCROW',
+        },
+        idempotencyKey: `accept-job-${jobId}-offer-${offerId}`,
+      });
+    } catch (err: any) {
+      // Payment failure must NOT accept offer and must display explicit error
+      throw new BadRequestException(
+        `Payment failed: ${err.message || 'Card declined'}. Your card was not charged and the offer was not accepted. Please check your card or add another payment method.`,
+      );
+    }
+
+    if (pi.status !== 'succeeded') {
+      throw new BadRequestException(
+        `Payment could not be completed off-session (Stripe status: ${pi.status}). The offer was not accepted.`,
+      );
+    }
+
+    // ── Charge Succeeded: Atomic Transition ──
+    const newOrder = await this.prisma.$transaction(async (tx) => {
+      // 1. Accepted offer
+      await tx.offer.update({
         where: { id: offerId },
         data: { status: OfferStatus.ACCEPTED },
-      }),
-      this.prisma.offer.updateMany({
+      });
+
+      // 2. All remaining offers marked NOT_SELECTED
+      await tx.offer.updateMany({
         where: { jobId, id: { not: offerId } },
-        data: { status: OfferStatus.REJECTED },
-      }),
-      this.prisma.job.update({
+        data: { status: OfferStatus.NOT_SELECTED },
+      });
+
+      // 3. Job marked CLOSED
+      await tx.job.update({
         where: { id: jobId },
-        data: { status: JobStatus.AWARDED },
-      }),
-    ]);
+        data: { status: JobStatus.CLOSED },
+      });
 
-    // 2. Automatically generate an active escrow order if one does not already exist
-    const existingOrder = await this.prisma.order.findFirst({
-      where: { offerId },
-    });
-
-    if (!existingOrder) {
-      const subtotal = new Prisma.Decimal(offer.price);
-      const platformFee = subtotal.mul(0.05).toDecimalPlaces(2);
-      const grandTotal = subtotal.add(platformFee);
-      const orderNumber = `ORD-${Date.now().toString().slice(-6)}-${Math.floor(100 + Math.random() * 900)}`;
-
-      const newOrder = await this.prisma.order.create({
+      // 4. Create Order: status ACTIVE, paymentStatus VAULT_HELD
+      const createdOrder = await tx.order.create({
         data: {
           orderNumber,
-          clientProfileId: clientProfileId || job.clientProfileId,
+          clientProfileId: client!.id,
           vendorProfileId: offer.vendorProfileId,
+          source: OrderSource.JOB,
           jobId,
           offerId,
           subtotal,
           platformFee,
+          vendorNet,
+          amount: grandTotal,
           grandTotal,
-          status: OrderStatus.PENDING_PAYMENT,
+          status: OrderStatus.ACTIVE,
+          paymentStatus: PaymentStatus.VAULT_HELD,
+          stripePaymentIntentId: pi.id,
+          paidAt: new Date(),
           deliveryNotes: `Custom engagement for: ${job.title}`,
           eventDate: job.eventDate,
         },
       });
 
-      // Generate milestones based on vendor offer structure (Full Payment vs Staged Milestones)
-      let milestoneData: any[] = [];
-      const splitJson: any = offer.escrowSplitJson;
-
-      if (splitJson && splitJson.type === 'FULL') {
-        milestoneData = [
-          {
-            orderId: newOrder.id,
-            label: splitJson.milestones?.[0]?.label || 'Full Project Payment (100%)',
-            percentage: 100,
-            amount: subtotal,
-            sortOrder: 1,
-            status: MilestoneStatus.LOCKED,
-            note: splitJson.milestones?.[0]?.note || 'Full payment held in Ophir Vault Escrow. Released upon final delivery and project completion.',
-          },
-        ];
-      } else if (splitJson && splitJson.type === 'MILESTONE' && Array.isArray(splitJson.milestones) && splitJson.milestones.length > 0) {
-        let runningAmount = new Prisma.Decimal(0);
-        milestoneData = splitJson.milestones.map((m: any, idx: number) => {
-          const isLast = idx === splitJson.milestones.length - 1;
-          const pct = Number(m.percentage) || Math.round(100 / splitJson.milestones.length);
-          let amt: Prisma.Decimal;
-          if (isLast) {
-            amt = subtotal.sub(runningAmount);
-          } else {
-            amt = m.amount ? new Prisma.Decimal(m.amount).toDecimalPlaces(2) : subtotal.mul(pct / 100).toDecimalPlaces(2);
-            runningAmount = runningAmount.add(amt);
-          }
-          return {
-            orderId: newOrder.id,
-            label: m.label || `Milestone ${idx + 1}`,
-            percentage: pct,
-            amount: amt,
-            sortOrder: idx + 1,
-            status: MilestoneStatus.LOCKED,
-            note: m.note || `Milestone ${idx + 1} held in Ophir Vault Escrow.`,
-          };
+      // 5. Vendor Wallet: increment pendingAmount (active order running)
+      let wallet = await tx.vendorWallet.findUnique({
+        where: { vendorProfileId: offer.vendorProfileId },
+      });
+      if (!wallet) {
+        wallet = await tx.vendorWallet.create({
+          data: { vendorProfileId: offer.vendorProfileId },
         });
-      } else if (Array.isArray(splitJson) && splitJson.length > 0) {
-        milestoneData = splitJson.map((m: any, idx: number) => ({
-          orderId: newOrder.id,
-          label: m.label || `Milestone ${idx + 1}`,
-          percentage: Number(m.percentage) || 50,
-          amount: m.amount ? new Prisma.Decimal(m.amount).toDecimalPlaces(2) : subtotal.mul((Number(m.percentage) || 50) / 100).toDecimalPlaces(2),
-          sortOrder: idx + 1,
-          status: MilestoneStatus.LOCKED,
-          note: m.note || `Milestone ${idx + 1} held in Ophir Vault Escrow.`,
-        }));
-      } else {
-        // Fallback: 50% deposit and 50% final completion
-        const halfAmount = subtotal.div(2).toDecimalPlaces(2);
-        const secondHalf = subtotal.sub(halfAmount);
-
-        milestoneData = [
-          {
-            orderId: newOrder.id,
-            label: 'Deposit & Date Reservation (50%)',
-            percentage: 50,
-            amount: halfAmount,
-            sortOrder: 1,
-            status: MilestoneStatus.LOCKED,
-            note: 'Funds held in Ophir Vault Escrow custody until event date.',
-          },
-          {
-            orderId: newOrder.id,
-            label: 'Final Event Execution & Teaser Signoff (50%)',
-            percentage: 50,
-            amount: secondHalf,
-            sortOrder: 2,
-            status: MilestoneStatus.LOCKED,
-            note: 'Released after successful event execution and delivery sign-off.',
-          },
-        ];
       }
 
-      await this.prisma.milestone.createMany({
-        data: milestoneData,
+      await tx.vendorWallet.update({
+        where: { id: wallet.id },
+        data: {
+          pendingAmount: { increment: vendorNet },
+        },
       });
-    }
 
-    const activeOrder = existingOrder || (await this.prisma.order.findFirst({ where: { offerId } }));
+      // 6. Wallet Ledger Entry
+      await tx.walletLedgerEntry.create({
+        data: {
+          walletId: wallet.id,
+          vendorProfileId: offer.vendorProfileId,
+          orderId: createdOrder.id,
+          type: LedgerEntryType.ORDER_PAYMENT,
+          gross: grandTotal,
+          platformFee,
+          vendorNet,
+          status: LedgerStatus.PENDING,
+          description: `Escrow vault hold for Job Offer #${orderNumber} (${job.title})`,
+        },
+      });
+
+      // 7. Transaction record
+      await tx.transaction.create({
+        data: {
+          txRef: `ESCROW-JOB-${pi.id}`,
+          orderId: createdOrder.id,
+          clientProfileId: client!.id,
+          vendorProfileId: offer.vendorProfileId,
+          type: TransactionType.ESCROW_DEPOSIT,
+          amount: grandTotal,
+          fee: platformFee,
+          net: vendorNet,
+          status: PaymentStatus.SUCCEEDED,
+          stripeId: pi.id,
+          description: `Off-session escrow payment for Job #${orderNumber}`,
+        },
+      });
+
+      return createdOrder;
+    });
+
+    // ── Notifications ──
+    try {
+      if (offer.vendorProfile?.userId) {
+        await this.notifications.createNotification({
+          userId: offer.vendorProfile.userId,
+          type: NotificationType.OFFER_ACCEPTED,
+          title: 'Offer Accepted & Funded!',
+          body: `Congratulations! Your proposal for "${job.title}" was accepted and $${vendorNet.toFixed(2)} is secured in platform escrow. Order #${newOrder.orderNumber} is now ACTIVE.`,
+          link: `/vendor/orders/${newOrder.id}`,
+        });
+      }
+
+      // Notify unselected vendors
+      const otherOffers = await this.prisma.offer.findMany({
+        where: { jobId, id: { not: offerId } },
+        include: { vendorProfile: true },
+      });
+      for (const other of otherOffers) {
+        if (other.vendorProfile?.userId) {
+          await this.notifications.createNotification({
+            userId: other.vendorProfile.userId,
+            type: NotificationType.GENERAL,
+            title: 'Job RFP Update',
+            body: `Another vendor proposal was accepted for "${job.title}". Thank you for your submission.`,
+            link: `/vendor/offers`,
+          });
+        }
+      }
+    } catch (_) {}
 
     return {
-      message: 'Offer accepted successfully, remaining offers declined, and escrow order generated',
+      success: true,
+      message: 'Offer accepted, client card charged off-session, funds held in escrow vault, and order is active.',
       offerId,
       jobId,
-      orderId: activeOrder?.id,
-      orderNumber: activeOrder?.orderNumber,
+      orderId: newOrder.id,
+      orderNumber: newOrder.orderNumber,
+      status: OrderStatus.ACTIVE,
+      amount: Number(grandTotal),
+      vendorNet: Number(vendorNet),
     };
   }
 
