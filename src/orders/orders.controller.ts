@@ -6,7 +6,7 @@ import * as fs from 'fs';
 import * as crypto from 'crypto';
 import { ApiTags, ApiOperation, ApiBearerAuth, ApiConsumes } from '@nestjs/swagger';
 import { OrdersService } from './orders.service';
-import { CreateOrderDto, ApproveMilestoneDto, DeclineDeliveryDto, SubmitMilestoneDto, CreateReviewDto, CreateDisputeDto, OrderQueryDto, CancelOrderDto, RespondDisputeDto, TransitionOrderDto, RequestRevisionDto, DeliverOrderDto } from './dto/order.dto';
+import { CreateOrderDto, ApproveMilestoneDto, DeclineDeliveryDto, SubmitMilestoneDto, CreateReviewDto, CreateDisputeDto, OrderQueryDto, CancelOrderDto, RespondDisputeDto, TransitionOrderDto, RequestRevisionDto, DeliverOrderDto, RequestCancellationDto, RespondCancellationDto, RequestPartialRefundDto, RespondPartialRefundDto, EscalateToAdminDto, AdminResolveDisputeDto } from './dto/order.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
@@ -181,6 +181,14 @@ export class OrdersController {
     return this.ordersService.transitionOrder(orderId, role, dto);
   }
 
+  @Get('admin/disputes-and-escalations')
+  @UseGuards(RolesGuard)
+  @Roles(Role.ADMIN)
+  @ApiOperation({ summary: 'List all orders requiring admin dispute resolution or review (Admin)' })
+  getAdminDisputesAndEscalations(@Query() query: any) {
+    return this.ordersService.getAdminDisputesAndEscalations(query);
+  }
+
   @Get(':id')
   @ApiOperation({ summary: 'Get single order detail' })
   getOrder(@Param('id') id: string, @Req() req: any) {
@@ -317,6 +325,106 @@ export class OrdersController {
       dto,
       req.user?.id || req.user?.sub,
     );
+  }
+
+  @Post(':id/request-cancel')
+  @UseGuards(RolesGuard)
+  @Roles(Role.CLIENT)
+  @ApiOperation({ summary: 'Client requests order cancellation with reason and proof (Client)' })
+  requestCancellation(
+    @Param('id') orderId: string,
+    @Req() req: any,
+    @Body() dto: RequestCancellationDto,
+  ) {
+    return this.ordersService.requestCancellation(
+      orderId,
+      req.user?.clientProfileId,
+      dto,
+      req.user?.id || req.user?.sub,
+    );
+  }
+
+  @Post(':id/respond-cancel')
+  @UseGuards(RolesGuard)
+  @Roles(Role.VENDOR)
+  @ApiOperation({ summary: 'Vendor accepts or declines cancellation request (Vendor)' })
+  respondCancellation(
+    @Param('id') orderId: string,
+    @Req() req: any,
+    @Body() dto: RespondCancellationDto,
+  ) {
+    return this.ordersService.respondCancellation(
+      orderId,
+      req.user?.vendorProfileId,
+      dto,
+      req.user?.id || req.user?.sub,
+    );
+  }
+
+  @Post(':id/request-partial-refund')
+  @UseGuards(RolesGuard)
+  @Roles(Role.CLIENT)
+  @ApiOperation({ summary: 'Client requests partial refund with amount, reason, and proof (Client)' })
+  requestPartialRefund(
+    @Param('id') orderId: string,
+    @Req() req: any,
+    @Body() dto: RequestPartialRefundDto,
+  ) {
+    return this.ordersService.requestPartialRefund(
+      orderId,
+      req.user?.clientProfileId,
+      dto,
+      req.user?.id || req.user?.sub,
+    );
+  }
+
+  @Post(':id/respond-partial-refund')
+  @UseGuards(RolesGuard)
+  @Roles(Role.VENDOR)
+  @ApiOperation({ summary: 'Vendor accepts or declines partial refund request (Vendor)' })
+  respondPartialRefund(
+    @Param('id') orderId: string,
+    @Req() req: any,
+    @Body() dto: RespondPartialRefundDto,
+  ) {
+    return this.ordersService.respondPartialRefund(
+      orderId,
+      req.user?.vendorProfileId,
+      dto,
+      req.user?.id || req.user?.sub,
+    );
+  }
+
+  @Post(':id/escalate')
+  @ApiOperation({ summary: 'Escalate disputed/rejected order case to Admin (Client/Vendor)' })
+  escalateToAdmin(
+    @Param('id') orderId: string,
+    @Req() req: any,
+    @Body() dto: EscalateToAdminDto,
+  ) {
+    const role = req.user?.role || Role.CLIENT;
+    const profileId = role === Role.CLIENT ? req.user?.clientProfileId : req.user?.vendorProfileId;
+    return this.ordersService.escalateToAdmin(
+      orderId,
+      role,
+      profileId,
+      dto,
+      req.user?.id || req.user?.sub,
+    );
+  }
+
+  @Post(':id/admin-resolve')
+  @UseGuards(RolesGuard)
+  @Roles(Role.ADMIN)
+  @ApiOperation({ summary: 'Admin arbitrates and resolves order dispute (Admin)' })
+  adminResolveDispute(
+    @Param('id') orderId: string,
+    @Req() req: any,
+    @Body() dto: AdminResolveDisputeDto,
+  ) {
+    const adminId = req.user?.id || req.user?.sub;
+    const ipAddress = req.ip || req.connection?.remoteAddress;
+    return this.ordersService.adminResolveDispute(orderId, adminId, dto, ipAddress);
   }
 
   // ── ORDER CHAT REST ENDPOINTS ──────────────────────────────
