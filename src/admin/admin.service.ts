@@ -14,6 +14,7 @@ import {
   ReportStatus,
   DisputeStatus,
 } from '@prisma/client';
+import { evaluateVendorTier } from '../config/vendor-levels.config';
 
 @Injectable()
 export class AdminService {
@@ -1166,25 +1167,52 @@ export class AdminService {
     let updatedCount = 0;
 
     for (const v of vendors) {
-      const orderCount = await this.prisma.order.count({
-        where: { vendorProfileId: v.id, status: OrderStatus.COMPLETED },
-      });
+      const [completedOrders, completedSum, allOrdersCount, cancelledOrdersCount] = await Promise.all([
+        this.prisma.order.count({
+          where: { vendorProfileId: v.id, status: OrderStatus.COMPLETED },
+        }),
+        this.prisma.order.aggregate({
+          where: { vendorProfileId: v.id, status: OrderStatus.COMPLETED },
+          _sum: { vendorNet: true },
+        }),
+        this.prisma.order.count({
+          where: { vendorProfileId: v.id },
+        }),
+        this.prisma.order.count({
+          where: { vendorProfileId: v.id, status: OrderStatus.CANCELLED },
+        }),
+      ]);
+
+      const deliveryRate = (completedOrders + cancelledOrdersCount) > 0
+        ? (completedOrders / (completedOrders + cancelledOrdersCount)) * 100
+        : (v.onTimeDeliveryPct || 100);
+      const cancelRatio = allOrdersCount > 0 ? (cancelledOrdersCount / allOrdersCount) * 100 : 0;
+      const totalEarnings = Number(completedSum._sum.vendorNet || 0);
       const avgRating = Number(v.rating) || 5.0;
 
-      let newTier: VendorTier = VendorTier.SPROUT;
-      if (orderCount >= 100 && avgRating >= 4.9) {
-        newTier = VendorTier.ELITE;
-      } else if (orderCount >= 40 && avgRating >= 4.8) {
-        newTier = VendorTier.PRO;
-      } else if (orderCount >= 10 && avgRating >= 4.5) {
-        newTier = VendorTier.RISING;
-      }
+      const newTier = evaluateVendorTier({
+        completedOrders,
+        totalEarnings,
+        deliveryRate,
+        avgRating,
+        cancelRatio,
+      });
 
       if (v.tier !== newTier) {
-        await this.prisma.vendorProfile.update({
-          where: { id: v.id },
-          data: { tier: newTier },
-        });
+        await Promise.all([
+          this.prisma.vendorProfile.update({
+            where: { id: v.id },
+            data: { tier: newTier },
+          }),
+          this.prisma.levelHistory.create({
+            data: {
+              vendorProfileId: v.id,
+              fromTier: v.tier,
+              toTier: newTier,
+              reason: `Progression evaluated via config rules. Orders: ${completedOrders}, Earnings: $${totalEarnings}, Delivery: ${deliveryRate.toFixed(1)}%`,
+            },
+          }),
+        ]);
         updatedCount++;
       }
     }
