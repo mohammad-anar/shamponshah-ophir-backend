@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { JobsService } from './jobs.service';
-import { CreateJobDto, UpdateJobDto, CreateOfferDto, JobQueryDto } from './dto/job.dto';
+import { CreateJobDto, UpdateJobDto, CreateOfferDto, JobQueryDto, AcceptOfferDto } from './dto/job.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
@@ -69,9 +69,20 @@ export class JobsController {
   @Post('user/jobs/:jobId/offers/:offerId/accept')
   @UseGuards(RolesGuard)
   @Roles(Role.CLIENT)
-  @ApiOperation({ summary: 'Accept a vendor offer and award the job (Client)' })
-  acceptOffer(@Param('jobId') jobId: string, @Param('offerId') offerId: string, @Req() req: any) {
-    return this.jobsService.acceptOffer(jobId, offerId, req.user?.clientProfileId, req.user?.id || req.user?.sub);
+  @ApiOperation({ summary: 'Accept a vendor offer with off-session escrow charge (Client)' })
+  acceptOffer(
+    @Param('jobId') jobId: string,
+    @Param('offerId') offerId: string,
+    @Req() req: any,
+    @Body() dto?: AcceptOfferDto,
+  ) {
+    return this.jobsService.acceptOffer(
+      jobId,
+      offerId,
+      req.user?.clientProfileId,
+      req.user?.id || req.user?.sub,
+      dto?.paymentMethodId,
+    );
   }
 
   @Delete('user/jobs/:id')
