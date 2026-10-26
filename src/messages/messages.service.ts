@@ -351,11 +351,11 @@ export class MessagesService {
 
     const isClient = order.clientProfile?.userId === userId;
     const isVendor = order.vendorProfile?.userId === userId;
-    const isAdminDisputed = role === Role.ADMIN && order.status === OrderStatus.DISPUTED;
+    const isAdmin = role === Role.ADMIN;
 
-    if (!isClient && !isVendor && !isAdminDisputed) {
+    if (!isClient && !isVendor && !isAdmin) {
       throw new ForbiddenException(
-        'Unauthorized: Only the assigned client, vendor, or an admin during an active dispute can access this order chat.',
+        'Unauthorized: Only the assigned client, vendor, or an admin can access this order chat.',
       );
     }
 
