@@ -1,8 +1,8 @@
-import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
+import { Injectable, NotFoundException, ForbiddenException, BadRequestException, Inject, forwardRef } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { NotificationsService } from '../notifications/notifications.service';
 import { SendMessageDto, StartConversationDto } from './dto/message.dto';
-import { NotificationType } from '@prisma/client';
+import { NotificationType, Role, OrderStatus } from '@prisma/client';
 import { MessagesGateway } from './messages.gateway';
 
 @Injectable()
@@ -10,6 +10,7 @@ export class MessagesService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly notifications: NotificationsService,
+    @Inject(forwardRef(() => MessagesGateway))
     private readonly messagesGateway: MessagesGateway,
   ) {}
 
@@ -323,5 +324,262 @@ export class MessagesService {
       await this.sendMessage(conversation.id, senderId, { content: dto.initialMessage });
     }
     return conversation;
+  }
+
+  // ── ORDER CHAT METHODS ───────────────────────────────────────
+
+  async verifyOrderAccess(orderId: string, userId: string, role?: Role) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: orderId },
+      include: {
+        clientProfile: { select: { userId: true, displayName: true } },
+        vendorProfile: { select: { userId: true, businessName: true } },
+      },
+    });
+
+    if (!order) {
+      throw new NotFoundException('Order not found');
+    }
+
+    if (order.status === OrderStatus.PENDING_PAYMENT) {
+      throw new ForbiddenException('Order is unpaid. Chat unlocks once escrow payment is confirmed.');
+    }
+
+    if (order.status === OrderStatus.CANCELLED) {
+      throw new ForbiddenException('Order has been cancelled.');
+    }
+
+    const isClient = order.clientProfile?.userId === userId;
+    const isVendor = order.vendorProfile?.userId === userId;
+    const isAdminDisputed = role === Role.ADMIN && order.status === OrderStatus.DISPUTED;
+
+    if (!isClient && !isVendor && !isAdminDisputed) {
+      throw new ForbiddenException(
+        'Unauthorized: Only the assigned client, vendor, or an admin during an active dispute can access this order chat.',
+      );
+    }
+
+    return order;
+  }
+
+  async getOrderMessages(
+    orderId: string,
+    userId: string,
+    role?: Role,
+    pagination?: { page?: number; limit?: number; before?: string },
+  ) {
+    await this.verifyOrderAccess(orderId, userId, role);
+
+    const conversation = await this.prisma.conversation.findFirst({
+      where: { orderId },
+      include: { participants: true },
+    });
+
+    if (!conversation) {
+      return {
+        messages: [],
+        pagination: {
+          page: 1,
+          limit: pagination?.limit || 20,
+          total: 0,
+          totalPages: 0,
+          hasMore: false,
+        },
+      };
+    }
+
+    // Auto mark other participant's messages as read
+    await this.prisma.message
+      .updateMany({
+        where: { conversationId: conversation.id, senderId: { not: userId }, isRead: false },
+        data: { isRead: true },
+      })
+      .catch(() => null);
+
+    const page = pagination?.page && pagination.page > 0 ? Number(pagination.page) : 1;
+    const limit = pagination?.limit && pagination.limit > 0 ? Math.min(Number(pagination.limit), 50) : 20;
+    const skip = (page - 1) * limit;
+
+    const where: any = { conversationId: conversation.id };
+    if (pagination?.before) {
+      where.createdAt = { lt: new Date(pagination.before) };
+    }
+
+    const total = await this.prisma.message.count({ where });
+    const messagesDesc = await this.prisma.message.findMany({
+      where,
+      include: {
+        sender: {
+          select: {
+            id: true,
+            email: true,
+            role: true,
+            clientProfile: { select: { displayName: true, avatarUrl: true } },
+            vendorProfile: { select: { businessName: true, avatarUrl: true } },
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+      skip,
+      take: limit,
+    });
+
+    const messages = messagesDesc.reverse().map((msg) => {
+      const senderName =
+        msg.sender.role === Role.VENDOR
+          ? msg.sender.vendorProfile?.businessName || 'Vendor'
+          : msg.sender.clientProfile?.displayName || 'Client';
+      const senderAvatar =
+        msg.sender.role === Role.VENDOR
+          ? msg.sender.vendorProfile?.avatarUrl
+          : msg.sender.clientProfile?.avatarUrl;
+
+      return {
+        id: msg.id,
+        orderId,
+        conversationId: conversation.id,
+        senderId: msg.senderId,
+        senderName,
+        senderAvatar,
+        senderRole: msg.sender.role,
+        content: msg.content,
+        attachments: msg.attachments || [],
+        isRead: msg.isRead,
+        createdAt: msg.createdAt.toISOString(),
+        time: msg.createdAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      };
+    });
+
+    const totalPages = Math.ceil(total / limit);
+
+    return {
+      messages,
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages,
+        hasMore: skip + messagesDesc.length < total,
+      },
+    };
+  }
+
+  async sendOrderMessage(
+    orderId: string,
+    userId: string,
+    role?: Role,
+    dto?: { content?: string; attachments?: string[] },
+  ) {
+    const order = await this.verifyOrderAccess(orderId, userId, role);
+
+    if (!dto?.content?.trim() && (!dto?.attachments || dto.attachments.length === 0)) {
+      throw new BadRequestException('Message content or attachments required');
+    }
+
+    let conversation = await this.prisma.conversation.findFirst({
+      where: { orderId },
+      include: { participants: true },
+    });
+
+    if (!conversation) {
+      conversation = await this.prisma.conversation.create({
+        data: {
+          orderId,
+          participants: {
+            create: [
+              { userId: order.clientProfile!.userId },
+              { userId: order.vendorProfile!.userId },
+            ],
+          },
+        },
+        include: { participants: true },
+      });
+    }
+
+    const msg = await this.prisma.message.create({
+      data: {
+        conversationId: conversation.id,
+        senderId: userId,
+        content: (dto.content || '').trim(),
+        attachments: dto.attachments || [],
+        isRead: false,
+      },
+      include: {
+        sender: {
+          select: {
+            id: true,
+            email: true,
+            role: true,
+            clientProfile: { select: { displayName: true, avatarUrl: true } },
+            vendorProfile: { select: { businessName: true, avatarUrl: true } },
+          },
+        },
+      },
+    });
+
+    await this.prisma.conversation
+      .update({
+        where: { id: conversation.id },
+        data: { updatedAt: new Date() },
+      })
+      .catch(() => null);
+
+    const senderName =
+      msg.sender.role === Role.VENDOR
+        ? msg.sender.vendorProfile?.businessName || 'Vendor'
+        : msg.sender.clientProfile?.displayName || 'Client';
+    const senderAvatar =
+      msg.sender.role === Role.VENDOR
+        ? msg.sender.vendorProfile?.avatarUrl
+        : msg.sender.clientProfile?.avatarUrl;
+
+    const payload = {
+      id: msg.id,
+      orderId,
+      conversationId: conversation.id,
+      senderId: msg.senderId,
+      senderName,
+      senderAvatar,
+      senderRole: msg.sender.role,
+      content: msg.content,
+      attachments: msg.attachments || [],
+      isRead: msg.isRead,
+      createdAt: msg.createdAt.toISOString(),
+      time: msg.createdAt.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+    };
+
+    // Realtime broadcast to socket room order:{orderId}
+    this.messagesGateway.emitNewOrderMessage(orderId, payload);
+
+    return payload;
+  }
+
+  async markOrderMessagesAsRead(orderId: string, userId: string) {
+    const conversation = await this.prisma.conversation.findFirst({
+      where: { orderId },
+    });
+    if (!conversation) return { count: 0 };
+
+    const updateRes = await this.prisma.message.updateMany({
+      where: { conversationId: conversation.id, senderId: { not: userId }, isRead: false },
+      data: { isRead: true },
+    });
+
+    await this.prisma.conversationParticipant
+      .updateMany({
+        where: { conversationId: conversation.id, userId },
+        data: { lastReadAt: new Date() },
+      })
+      .catch(() => null);
+
+    if (this.messagesGateway?.server) {
+      this.messagesGateway.server.to(`order:${orderId}`).emit('order_messages_read', {
+        orderId,
+        readerId: userId,
+        readAt: new Date().toISOString(),
+      });
+    }
+
+    return { count: updateRes.count };
   }
 }
