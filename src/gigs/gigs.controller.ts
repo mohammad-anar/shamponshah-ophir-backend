@@ -1,7 +1,7 @@
 import { Body, Controller, Delete, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { GigsService } from './gigs.service';
-import { CreateGigDto, UpdateGigDto, CreateGigPackageDto, GigQueryDto } from './dto/gig.dto';
+import { CreateGigDto, UpdateGigDto, CreateGigPackageDto, GigQueryDto, ReportGigDto } from './dto/gig.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 
 @ApiTags('Gigs')
@@ -29,6 +29,17 @@ export class GigsController {
   @ApiOperation({ summary: 'Get single gig by slug (public)' })
   findOne(@Param('slug') slug: string) {
     return this.gigsService.findOne(slug);
+  }
+
+  @Post('gigs/:id/report')
+  @ApiOperation({ summary: 'Submit a report/grievance against a service gig' })
+  async reportGig(
+    @Param('id') gigId: string,
+    @Req() req: any,
+    @Body() dto: ReportGigDto,
+  ) {
+    const reporterId = req?.user?.id || req?.user?.sub || null;
+    return this.gigsService.reportGig(gigId, reporterId, dto);
   }
 
   // ── VENDOR: Gig CRUD ───────────────────────────────────────
