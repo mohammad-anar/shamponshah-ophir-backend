@@ -203,6 +203,7 @@ model VendorProfile {
   heroImageUrl        String?
   status              VendorStatus @default(PENDING_APPROVAL)
   tier                VendorTier   @default(SPROUT)
+  phone               String?
   city                String?
   state               String?
   serviceRadius       String?
