@@ -104,22 +104,58 @@ export const ORDER_STATE_MACHINE_TABLE: StateTransitionRule[] = [
   {
     from: OrderStatus.DISPUTED,
     to: OrderStatus.REFUNDED,
-    allowedRoles: [Role.ADMIN],
-    description: 'Admin resolved dispute in client favor (funds refunded to client)',
+    allowedRoles: [Role.ADMIN, Role.VENDOR],
+    description: 'Admin or Vendor resolved dispute in client favor (funds refunded to client)',
   },
-  // 13. DISPUTED -> COMPLETED_WITH_PARTIAL_REFUND: Admin splits resolution
+  // 13. DISPUTED -> COMPLETED_WITH_PARTIAL_REFUND: Admin splits resolution or Vendor accepts partial refund
   {
     from: OrderStatus.DISPUTED,
     to: OrderStatus.COMPLETED_WITH_PARTIAL_REFUND,
-    allowedRoles: [Role.ADMIN],
-    description: 'Admin resolved dispute with partial payout to vendor and partial refund to client',
+    allowedRoles: [Role.ADMIN, Role.VENDOR],
+    description: 'Admin or Vendor resolved dispute with partial payout to vendor and partial refund to client',
   },
-  // 14. DISPUTED -> CANCELLED: Admin voids order entirely
+  // 14. DISPUTED -> CANCELLED: Admin voids order entirely or vendor accepts
   {
     from: OrderStatus.DISPUTED,
     to: OrderStatus.CANCELLED,
-    allowedRoles: [Role.ADMIN],
-    description: 'Admin cancelled order during dispute review',
+    allowedRoles: [Role.ADMIN, Role.VENDOR],
+    description: 'Admin or Vendor cancelled order during dispute review',
+  },
+
+  // 15. ACTIVE -> COMPLETED_WITH_PARTIAL_REFUND
+  {
+    from: OrderStatus.ACTIVE,
+    to: OrderStatus.COMPLETED_WITH_PARTIAL_REFUND,
+    allowedRoles: [Role.VENDOR, Role.ADMIN],
+    description: 'Vendor or Admin accepted partial refund agreement on active order',
+  },
+  // 16. DELIVERED -> COMPLETED_WITH_PARTIAL_REFUND
+  {
+    from: OrderStatus.DELIVERED,
+    to: OrderStatus.COMPLETED_WITH_PARTIAL_REFUND,
+    allowedRoles: [Role.VENDOR, Role.ADMIN],
+    description: 'Vendor or Admin accepted partial refund settlement on delivered order',
+  },
+  // 17. REVISION_REQUESTED -> COMPLETED_WITH_PARTIAL_REFUND
+  {
+    from: OrderStatus.REVISION_REQUESTED,
+    to: OrderStatus.COMPLETED_WITH_PARTIAL_REFUND,
+    allowedRoles: [Role.VENDOR, Role.ADMIN],
+    description: 'Vendor or Admin accepted partial refund during revisions',
+  },
+  // 18. DELIVERED -> CANCELLED
+  {
+    from: OrderStatus.DELIVERED,
+    to: OrderStatus.CANCELLED,
+    allowedRoles: [Role.VENDOR, Role.ADMIN],
+    description: 'Vendor accepted cancellation or Admin cancelled delivered order',
+  },
+  // 19. REVISION_REQUESTED -> CANCELLED
+  {
+    from: OrderStatus.REVISION_REQUESTED,
+    to: OrderStatus.CANCELLED,
+    allowedRoles: [Role.VENDOR, Role.ADMIN],
+    description: 'Vendor accepted cancellation or Admin cancelled during revisions',
   },
 ];
 
