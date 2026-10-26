@@ -47,7 +47,16 @@ export class GigQueryDto {
   @ApiPropertyOptional() @Type(() => Number) @IsNumber() @IsOptional() maxPrice?: number;
   @ApiPropertyOptional() @Type(() => Number) @IsNumber() @IsOptional() page?: number = 1;
   @ApiPropertyOptional() @Type(() => Number) @IsNumber() @IsOptional() limit?: number = 12;
+  @ApiPropertyOptional({ description: 'Session-based seed for consistent pagination and fair ranking shuffle' })
+  @IsString()
+  @IsOptional()
+  seed?: string;
+  @ApiPropertyOptional({ description: 'Sort criteria (recommended, rating, orders, price_asc, price_desc)' })
+  @IsString()
+  @IsOptional()
+  sortBy?: string;
 }
+
 
 export class ReportGigDto {
   @ApiProperty({ example: 'Misleading pricing or prohibited service' })
