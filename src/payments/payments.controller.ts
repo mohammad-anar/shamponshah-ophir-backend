@@ -15,6 +15,7 @@ import {
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
+import { Public } from '../auth/decorators/public.decorator';
 import { Role } from '@prisma/client';
 
 @ApiTags('Payments & Stripe Connect')
@@ -160,6 +161,7 @@ export class PaymentsController {
 
   // ── Vendor: Bid Credits ────────────────────────────────────
 
+  @Public()
   @Get('bid-credit-packages')
   @ApiOperation({ summary: 'Get active bid credit packages for purchasing (Public / Authenticated)' })
   getBidCreditPackages() {
