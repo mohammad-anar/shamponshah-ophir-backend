@@ -37,9 +37,19 @@ enum VendorTier {
 
 enum GigStatus {
   DRAFT
+  PENDING_VERIFICATION
   ACTIVE
   PAUSED
   ARCHIVED
+  REJECTED
+  SUSPENDED
+}
+
+enum ReportStatus {
+  PENDING
+  REVIEWED
+  RESOLVED
+  DISMISSED
 }
 
 enum JobStatus {
@@ -150,6 +160,7 @@ model User {
   conversationParts ConversationParticipant[]
   familyMemberships FamilyMember[]
   savedVendors      SavedVendor[]
+  gigReports        GigReport[]
 
   @@map("users")
 }
@@ -311,12 +322,39 @@ model Gig {
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
 
-  packages  GigPackage[]
-  gallery   GigGalleryItem[]
-  orders    Order[]
-  gigReviews Review[]        @relation("GigReviews")
+  rejectionReason String?       @db.Text
+  adminNotes      String?       @db.Text
+  adminReviewedAt DateTime?
+  adminReviewedById String?
+
+  packages   GigPackage[]
+  gallery    GigGalleryItem[]
+  orders     Order[]
+  gigReviews Review[]         @relation("GigReviews")
+  reports    GigReport[]
 
   @@map("gigs")
+}
+
+model GigReport {
+  id              String        @id @default(cuid())
+  gigId           String
+  gig             Gig           @relation(fields: [gigId], references: [id], onDelete: Cascade)
+  reporterId      String?
+  reporter        User?         @relation(fields: [reporterId], references: [id], onDelete: SetNull)
+  reporterName    String?
+  reporterEmail   String?
+  reason          String
+  description     String        @db.Text
+  status          ReportStatus  @default(PENDING)
+  adminNotes      String?       @db.Text
+  actionTaken     String?
+  resolvedAt      DateTime?
+  resolvedById    String?
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+
+  @@map("gig_reports")
 }
 
 model GigPackage {
