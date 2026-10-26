@@ -4,6 +4,8 @@ import { StripeService } from '../stripe/stripe.service';
 import { ConfigService } from '@nestjs/config';
 import {
   CreatePaymentIntentDto,
+  CreateOrderPaymentIntentDto,
+  ConfirmOrderPaymentDto,
   CreateDisputeDto,
   ResolveDisputeDto,
   WithdrawEarningsDto,
@@ -11,7 +13,7 @@ import {
   SavePaymentMethodDto,
   UpdateVendorPayoutPreferencesDto,
 } from './dto/payment.dto';
-import { DisputeStatus, TransactionType, PaymentStatus, MilestoneStatus, OrderStatus } from '@prisma/client';
+import { DisputeStatus, TransactionType, PaymentStatus, MilestoneStatus, OrderStatus, LedgerStatus, LedgerEntryType, Prisma } from '@prisma/client';
 
 @Injectable()
 export class PaymentsService {
@@ -95,6 +97,276 @@ export class PaymentsService {
     }
 
     return { clientSecret: pi.client_secret, paymentIntentId: pi.id, milestoneId: milestone.id, amount: chargeAmount, paymentStatus: pi.status };
+  }
+
+  // ── Order Payment Intent (Separate Charges and Transfers) ────
+
+  async createOrderPaymentIntent(clientProfileId: string, dto: CreateOrderPaymentIntentDto) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: dto.orderId },
+      include: { clientProfile: true, vendorProfile: true },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    if (order.clientProfileId !== clientProfileId) throw new ForbiddenException('You cannot pay for this order');
+    if (order.status !== OrderStatus.PENDING_PAYMENT) {
+      throw new BadRequestException(`Order cannot be funded in status ${order.status}`);
+    }
+
+    const idempotencyKey = dto.idempotencyKey || `pi-order-${order.id}`;
+    const amount = Number(order.amount || order.grandTotal);
+    const platformFee = Number(order.platformFee);
+    const vendorNet = Number(order.vendorNet);
+
+    // If order already has a stripe payment intent, check status
+    if (order.stripePaymentIntentId) {
+      try {
+        const existingPi = await this.stripe.retrievePaymentIntent(order.stripePaymentIntentId);
+        if (existingPi.status === 'succeeded' || existingPi.status !== 'canceled') {
+          return {
+            clientSecret: existingPi.client_secret,
+            paymentIntentId: existingPi.id,
+            orderId: order.id,
+            orderNumber: order.orderNumber,
+            amount,
+            platformFee,
+            vendorNet,
+            paymentStatus: existingPi.status,
+          };
+        }
+      } catch (err) {
+        // If retrieval fails, recreate
+      }
+    }
+
+    const pi = await this.stripe.createOrderPaymentIntent({
+      amount,
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      clientId: clientProfileId,
+      vendorId: order.vendorProfileId,
+      platformFee,
+      vendorNet,
+      customerId: order.clientProfile?.stripeCustomerId || undefined,
+      idempotencyKey,
+    });
+
+    await this.prisma.order.update({
+      where: { id: order.id },
+      data: { stripePaymentIntentId: pi.id },
+    });
+
+    return {
+      clientSecret: pi.client_secret,
+      paymentIntentId: pi.id,
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      amount,
+      platformFee,
+      vendorNet,
+      paymentStatus: pi.status,
+    };
+  }
+
+  // ── Confirm Order Payment (Idempotent Escrow Hold) ─────────
+
+  async confirmOrderPayment(clientProfileId: string, dto: ConfirmOrderPaymentDto) {
+    const order = await this.prisma.order.findUnique({
+      where: { id: dto.orderId },
+      include: { clientProfile: true, vendorProfile: true },
+    });
+    if (!order) throw new NotFoundException('Order not found');
+    if (order.clientProfileId !== clientProfileId) throw new ForbiddenException('Unauthorized for this order');
+
+    // Idempotency: if already confirmed and active
+    if (order.status === OrderStatus.ACTIVE && order.paymentStatus === PaymentStatus.VAULT_HELD) {
+      return {
+        success: true,
+        orderId: order.id,
+        orderNumber: order.orderNumber,
+        status: order.status,
+        paymentStatus: order.paymentStatus,
+        amount: Number(order.amount || order.grandTotal),
+        vendorNet: Number(order.vendorNet),
+        platformFee: Number(order.platformFee),
+        alreadyConfirmed: true,
+      };
+    }
+
+    // Verify PaymentIntent status on Stripe
+    const pi = await this.stripe.retrievePaymentIntent(dto.paymentIntentId);
+    if (pi.status !== 'succeeded') {
+      throw new BadRequestException(`Payment not completed. Stripe status is: ${pi.status}`);
+    }
+
+    const grossAmount = order.amount || order.grandTotal;
+    const netAmount = order.vendorNet;
+    const feeAmount = order.platformFee;
+
+    await this.prisma.$transaction(async (tx) => {
+      // 1. Update order
+      await tx.order.update({
+        where: { id: order.id },
+        data: {
+          status: OrderStatus.ACTIVE,
+          paymentStatus: PaymentStatus.VAULT_HELD,
+          stripePaymentIntentId: pi.id,
+          paidAt: new Date(),
+        },
+      });
+
+      // 2. Find or create vendor wallet
+      let wallet = await tx.vendorWallet.findUnique({
+        where: { vendorProfileId: order.vendorProfileId },
+      });
+      if (!wallet) {
+        wallet = await tx.vendorWallet.create({
+          data: { vendorProfileId: order.vendorProfileId },
+        });
+      }
+
+      // Increment Pending amount (active order running)
+      await tx.vendorWallet.update({
+        where: { id: wallet.id },
+        data: {
+          pendingAmount: { increment: netAmount },
+        },
+      });
+
+      // 3. Create wallet ledger entry
+      await tx.walletLedgerEntry.create({
+        data: {
+          walletId: wallet.id,
+          vendorProfileId: order.vendorProfileId,
+          orderId: order.id,
+          type: LedgerEntryType.ORDER_PAYMENT,
+          gross: grossAmount,
+          platformFee: feeAmount,
+          vendorNet: netAmount,
+          status: LedgerStatus.PENDING,
+          description: `Escrow hold for Order #${order.orderNumber} (Funds secured on platform)`,
+        },
+      });
+
+      // 4. Record transaction log
+      await tx.transaction.upsert({
+        where: { txRef: `ESCROW-ORDER-${pi.id}` },
+        create: {
+          txRef: `ESCROW-ORDER-${pi.id}`,
+          orderId: order.id,
+          clientProfileId: order.clientProfileId,
+          vendorProfileId: order.vendorProfileId,
+          type: TransactionType.ESCROW_DEPOSIT,
+          amount: grossAmount,
+          fee: feeAmount,
+          net: netAmount,
+          status: PaymentStatus.SUCCEEDED,
+          stripeId: pi.id,
+          description: `Escrow vault hold for Order #${order.orderNumber}`,
+        },
+        update: { status: PaymentStatus.SUCCEEDED },
+      });
+    });
+
+    return {
+      success: true,
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      status: OrderStatus.ACTIVE,
+      paymentStatus: PaymentStatus.VAULT_HELD,
+      amount: Number(grossAmount),
+      platformFee: Number(feeAmount),
+      vendorNet: Number(netAmount),
+      paidAt: new Date(),
+    };
+  }
+
+  // ── Vendor Wallet & 3 Balances with Auto-Clearing ──────────
+
+  async getVendorWallet(vendorProfileId: string) {
+    const now = new Date();
+
+    // Auto-clear routine: Check any CLEARING entries older than 7 days
+    const clearingEntries = await this.prisma.walletLedgerEntry.findMany({
+      where: {
+        vendorProfileId,
+        status: LedgerStatus.CLEARING,
+        clearingEndsAt: { lte: now },
+      },
+    });
+
+    for (const entry of clearingEntries) {
+      await this.prisma.$transaction(async (tx) => {
+        await tx.walletLedgerEntry.update({
+          where: { id: entry.id },
+          data: { status: LedgerStatus.AVAILABLE },
+        });
+
+        await tx.vendorWallet.update({
+          where: { id: entry.walletId },
+          data: {
+            pendingForReleaseAmount: { decrement: entry.vendorNet },
+            availableAmount: { increment: entry.vendorNet },
+            totalEarned: { increment: entry.vendorNet },
+          },
+        });
+      });
+    }
+
+    let wallet = await this.prisma.vendorWallet.findUnique({
+      where: { vendorProfileId },
+      include: {
+        ledgerEntries: {
+          orderBy: { createdAt: 'desc' },
+          include: {
+            order: {
+              select: {
+                id: true,
+                orderNumber: true,
+                source: true,
+                status: true,
+                createdAt: true,
+              },
+            },
+          },
+          take: 50,
+        },
+      },
+    });
+
+    if (!wallet) {
+      wallet = await this.prisma.vendorWallet.create({
+        data: { vendorProfileId },
+        include: {
+          ledgerEntries: {
+            orderBy: { createdAt: 'desc' },
+            include: { order: true },
+          },
+        },
+      });
+    }
+
+    return {
+      walletId: wallet.id,
+      vendorProfileId,
+      pendingAmount: Number(wallet.pendingAmount),
+      pendingForReleaseAmount: Number(wallet.pendingForReleaseAmount),
+      availableAmount: Number(wallet.availableAmount),
+      totalEarned: Number(wallet.totalEarned),
+      totalWithdrawn: Number(wallet.totalWithdrawn),
+      ledgerEntries: wallet.ledgerEntries.map((e) => ({
+        id: e.id,
+        orderId: e.orderId,
+        orderNumber: (e as any).order?.orderNumber || null,
+        type: e.type,
+        gross: Number(e.gross),
+        platformFee: Number(e.platformFee),
+        vendorNet: Number(e.vendorNet),
+        status: e.status,
+        clearingEndsAt: e.clearingEndsAt,
+        description: e.description,
+        createdAt: e.createdAt,
+      })),
+    };
   }
 
   // Ã¢â€â‚¬Ã¢â€â‚¬ Payment Methods Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
