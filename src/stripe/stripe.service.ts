@@ -44,6 +44,67 @@ export class StripeService {
     }, { idempotencyKey: params.idempotencyKey });
   }
 
+  async createOrderPaymentIntent(params: {
+    amount: number;
+    currency?: string;
+    orderId: string;
+    orderNumber?: string;
+    clientId: string;
+    vendorId: string;
+    platformFee: number;
+    vendorNet: number;
+    customerId?: string;
+    idempotencyKey: string;
+  }) {
+    const amountInCents = Math.round(params.amount * 100);
+
+    return this.stripe.paymentIntents.create(
+      {
+        amount: amountInCents,
+        currency: params.currency || 'usd',
+        transfer_group: params.orderId,
+        metadata: {
+          orderId: params.orderId,
+          orderNumber: params.orderNumber || '',
+          clientId: params.clientId,
+          vendorProfileId: params.vendorId,
+          platformFee: String(params.platformFee),
+          vendorNet: String(params.vendorNet),
+          type: 'ORDER_ESCROW',
+        },
+        customer: params.customerId,
+        automatic_payment_methods: { enabled: true },
+      },
+      { idempotencyKey: params.idempotencyKey },
+    );
+  }
+
+  async createOffSessionOrderPaymentIntent(params: {
+    amount: number;
+    currency?: string;
+    customerId: string;
+    paymentMethodId: string;
+    transferGroup: string;
+    metadata: Record<string, string>;
+    idempotencyKey?: string;
+  }) {
+    const amountInCents = Math.round(params.amount * 100);
+
+    return this.stripe.paymentIntents.create(
+      {
+        amount: amountInCents,
+        currency: params.currency || 'usd',
+        customer: params.customerId,
+        payment_method: params.paymentMethodId,
+        off_session: true,
+        confirm: true,
+        transfer_group: params.transferGroup,
+        metadata: params.metadata,
+      },
+      params.idempotencyKey ? { idempotencyKey: params.idempotencyKey } : undefined,
+    );
+  }
+
   async retrievePaymentIntent(paymentIntentId: string) {
     return this.stripe.paymentIntents.retrieve(paymentIntentId);
   }
