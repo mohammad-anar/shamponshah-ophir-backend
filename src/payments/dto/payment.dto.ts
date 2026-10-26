@@ -8,6 +8,35 @@ export class CreatePaymentIntentDto {
 
   @ApiPropertyOptional({ description: 'Stripe payment method ID' })
   @IsString() @IsOptional() paymentMethodId?: string;
+
+  @ApiPropertyOptional({ description: 'Idempotency key' })
+  @IsString() @IsOptional() idempotencyKey?: string;
+}
+
+export class CreateOrderPaymentIntentDto {
+  @ApiProperty({ description: 'Order ID to fund via escrow' })
+  @IsString()
+  orderId: string;
+
+  @ApiPropertyOptional({ description: 'Unique idempotency key for this payment attempt' })
+  @IsString()
+  @IsOptional()
+  idempotencyKey?: string;
+}
+
+export class ConfirmOrderPaymentDto {
+  @ApiProperty({ description: 'Order ID' })
+  @IsString()
+  orderId: string;
+
+  @ApiProperty({ description: 'Stripe PaymentIntent ID (pi_xxx)' })
+  @IsString()
+  paymentIntentId: string;
+
+  @ApiPropertyOptional({ description: 'Unique idempotency key' })
+  @IsString()
+  @IsOptional()
+  idempotencyKey?: string;
 }
 
 export class SavePaymentMethodDto {
