@@ -264,8 +264,13 @@ model Category {
   slug        String   @unique
   description String?
   icon        String?
+  image       String?
   isActive    Boolean  @default(true)
   sortOrder   Int      @default(0)
+  order       Int      @default(0)
+  parentId    String?
+  parent      Category?  @relation("CategoryHierarchy", fields: [parentId], references: [id], onDelete: Cascade)
+  children    Category[] @relation("CategoryHierarchy")
   createdAt   DateTime @default(now())
 
   vendorCategories VendorCategory[]
