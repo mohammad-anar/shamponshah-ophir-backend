@@ -10,6 +10,8 @@ import {
   VendorQueryDto,
 } from './dto/vendor.dto';
 import { VendorStatus, VendorTier, OrderStatus } from '@prisma/client';
+import { calculateVendorBaseScore, applySessionSeededRanking } from '../ranking/ranking.engine';
+import { VENDOR_LEVELS_CONFIG, evaluateVendorTier } from '../config/vendor-levels.config';
 
 export function formatVendor(v: any) {
   if (!v) return v;
@@ -173,26 +175,54 @@ export class VendorsService {
       };
     }
 
-    const [vendors, total] = await Promise.all([
-      this.prisma.vendorProfile.findMany({
-        where,
-        include: {
-          categories: { include: { category: true } },
-          portfolio: { take: 4, orderBy: { sortOrder: 'asc' } },
-          gigs: {
-            where: { status: 'ACTIVE' },
-            select: { id: true, title: true, slug: true, packages: { take: 1, orderBy: { price: 'asc' } } },
-          },
+    const allMatchingVendors = await this.prisma.vendorProfile.findMany({
+      where,
+      include: {
+        categories: { include: { category: true } },
+        portfolio: { take: 4, orderBy: { sortOrder: 'asc' } },
+        gigs: {
+          where: { status: 'ACTIVE' },
+          select: { id: true, title: true, slug: true, packages: { take: 1, orderBy: { price: 'asc' } } },
         },
-        orderBy: [{ rating: 'desc' }, { ordersCompleted: 'desc' }],
-        skip,
-        take: limit,
-      }),
-      this.prisma.vendorProfile.count({ where }),
-    ]);
+      },
+    });
+
+    const total = allMatchingVendors.length;
+
+    // Apply ranking engine or specific sort criteria
+    let rankedVendors = allMatchingVendors;
+    const sortBy = query.sortBy || 'recommended';
+
+    if (sortBy === 'rating') {
+      rankedVendors.sort((a, b) => Number(b.rating || 0) - Number(a.rating || 0));
+    } else if (sortBy === 'orders') {
+      rankedVendors.sort((a, b) => Number(b.ordersCompleted || 0) - Number(a.ordersCompleted || 0));
+    } else if (sortBy === 'level') {
+      const levelMap: Record<string, number> = { ELITE: 4, PRO: 3, RISING: 2, SPROUT: 1 };
+      rankedVendors.sort((a, b) => (levelMap[b.tier || ''] || 0) - (levelMap[a.tier || ''] || 0));
+    } else {
+      // Default view: Fair ranking engine with cold-start boost + deterministic session-based shuffle
+      const sessionSeed = query.seed || 'session_default';
+      rankedVendors = applySessionSeededRanking(
+        allMatchingVendors,
+        (v) =>
+          calculateVendorBaseScore({
+            id: v.id,
+            deliveryRate: v.onTimeDeliveryPct,
+            rating: v.rating,
+            tier: v.tier,
+            ordersCompleted: v.ordersCompleted,
+            createdAt: v.createdAt,
+          }),
+        sessionSeed,
+        24, // +/- 12 points jitter for healthy rotation
+      );
+    }
+
+    const pagedVendors = rankedVendors.slice(skip, skip + limit);
 
     return {
-      data: vendors.map(formatVendor),
+      data: pagedVendors.map(formatVendor),
       pagination: {
         page,
         limit,
@@ -448,15 +478,26 @@ export class VendorsService {
       });
     }
 
-    // Level progress calculation
-    const tier = vendor.tier || 'RISING';
-    const nextTier = tier === 'SPROUT' ? 'Rising Vendor' : tier === 'RISING' ? 'Pro Vendor' : tier === 'PRO' ? 'Elite Vendor' : 'Max Guild Tier';
-    const targetOrders = tier === 'SPROUT' ? 5 : tier === 'RISING' ? 15 : tier === 'PRO' ? 40 : 100;
-    const targetDays = tier === 'SPROUT' ? 15 : tier === 'RISING' ? 30 : tier === 'PRO' ? 60 : 120;
-    const daysActive = Math.max(1, Math.floor((now.getTime() - new Date(vendor.createdAt).getTime()) / (1000 * 60 * 60 * 24)));
-    const ordersPct = Math.min(1, totalOrdersCompleted / targetOrders);
-    const daysPct = Math.min(1, daysActive / targetDays);
-    const progressPercent = Math.min(100, Math.round((ordersPct * 0.65 + daysPct * 0.35) * 100));
+    // Level progress calculation driven by VENDOR_LEVELS_CONFIG
+    const currentTier = (vendor.tier || VendorTier.SPROUT) as VendorTier;
+    const currentConfig = VENDOR_LEVELS_CONFIG[currentTier] || VENDOR_LEVELS_CONFIG[VendorTier.SPROUT];
+
+    const nextTierMap: Record<VendorTier, VendorTier | null> = {
+      [VendorTier.SPROUT]: VendorTier.RISING,
+      [VendorTier.RISING]: VendorTier.PRO,
+      [VendorTier.PRO]: VendorTier.ELITE,
+      [VendorTier.ELITE]: null,
+    };
+    const nextTierKey = nextTierMap[currentTier];
+    const nextConfig = nextTierKey ? VENDOR_LEVELS_CONFIG[nextTierKey] : null;
+
+    const targetOrders = nextConfig ? nextConfig.minCompletedOrders : currentConfig.minCompletedOrders;
+    const targetEarnings = nextConfig ? nextConfig.minEarnings : currentConfig.minEarnings;
+    const ordersPct = targetOrders > 0 ? Math.min(1, totalOrdersCompleted / targetOrders) : 1;
+    const earningsPct = targetEarnings > 0 ? Math.min(1, totalEarned / targetEarnings) : 1;
+    const progressPercent = nextConfig
+      ? Math.min(100, Math.round(Math.max(ordersPct, earningsPct) * 100))
+      : 100;
 
     return {
       profileImpressions: gigViewsSum,
@@ -473,17 +514,75 @@ export class VendorsService {
       tier: vendor.tier,
       monthlyRevenue,
       levelProgress: {
-        currentTier: vendor.tier || 'RISING',
-        nextTier,
+        currentTier: vendor.tier || 'SPROUT',
+        nextTier: nextConfig?.title || 'Max Guild Tier',
         progressPercent,
         ordersCompleted: totalOrdersCompleted,
         targetOrders,
-        daysActive,
-        targetDays,
+        targetEarnings,
         remainingOrders: Math.max(0, targetOrders - totalOrdersCompleted),
-        remainingDays: Math.max(0, targetDays - daysActive),
+        remainingEarnings: Math.max(0, targetEarnings - totalEarned),
+        currentTheme: currentConfig.theme,
       },
     };
+  }
+
+  async evaluateAndPromoteVendor(vendorProfileId: string) {
+    const vendor = await this.prisma.vendorProfile.findUnique({
+      where: { id: vendorProfileId },
+    });
+
+    if (!vendor) return null;
+
+    const [allOrders, completedOrdersList, cancelledOrdersCount] = await Promise.all([
+      this.prisma.order.count({ where: { vendorProfileId } }),
+      this.prisma.order.findMany({
+        where: {
+          vendorProfileId,
+          status: { in: [OrderStatus.COMPLETED, 'COMPLETED_WITH_PARTIAL_REFUND' as any] },
+        },
+        select: { vendorNet: true, amount: true },
+      }),
+      this.prisma.order.count({
+        where: { vendorProfileId, status: OrderStatus.CANCELLED },
+      }),
+    ]);
+
+    const completedOrders = completedOrdersList.length;
+    const totalEarnings = completedOrdersList.reduce((acc, o) => acc + Number(o.vendorNet || o.amount || 0), 0);
+    const deliveryRate = (completedOrders + cancelledOrdersCount) > 0
+      ? (completedOrders / (completedOrders + cancelledOrdersCount)) * 100
+      : (vendor.onTimeDeliveryPct || 100);
+    const cancelRatio = allOrders > 0 ? (cancelledOrdersCount / allOrders) * 100 : 0;
+    const avgRating = Number(vendor.rating) || 5.0;
+
+    const newTier = evaluateVendorTier({
+      completedOrders,
+      totalEarnings,
+      deliveryRate,
+      avgRating,
+      cancelRatio,
+    });
+
+    if (vendor.tier !== newTier) {
+      await Promise.all([
+        this.prisma.vendorProfile.update({
+          where: { id: vendor.id },
+          data: { tier: newTier },
+        }),
+        this.prisma.levelHistory.create({
+          data: {
+            vendorProfileId: vendor.id,
+            fromTier: vendor.tier,
+            toTier: newTier,
+            reason: `Progression evaluated via config rules. Orders: ${completedOrders}, Earnings: $${totalEarnings}, Delivery: ${deliveryRate.toFixed(1)}%`,
+          },
+        }),
+      ]);
+      return { promoted: true, fromTier: vendor.tier, toTier: newTier };
+    }
+
+    return { promoted: false, tier: vendor.tier };
   }
 
   // ── Vacation Mode ──────────────────────────────────────────
