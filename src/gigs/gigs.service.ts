@@ -1,8 +1,8 @@
 import { Injectable, NotFoundException, ForbiddenException } from '@nestjs/common';
 import { PrismaService } from '../prisma/prisma.service';
 import { RedisService } from '../redis/redis.service';
-import { CreateGigDto, UpdateGigDto, CreateGigPackageDto, GigQueryDto } from './dto/gig.dto';
-import { GigStatus } from '@prisma/client';
+import { CreateGigDto, UpdateGigDto, CreateGigPackageDto, GigQueryDto, ReportGigDto } from './dto/gig.dto';
+import { GigStatus, ReportStatus } from '@prisma/client';
 
 @Injectable()
 export class GigsService {
@@ -63,7 +63,7 @@ export class GigsService {
         title: dto.title,
         slug,
         description: dto.description,
-        status: GigStatus.ACTIVE,
+        status: GigStatus.PENDING_VERIFICATION,
         tags: dto.tags || [],
         faqs: dto.faqs || null,
       },
@@ -350,6 +350,34 @@ export class GigsService {
     const pkg = await this.prisma.gigPackage.findUnique({ where: { id: packageId } });
     if (!pkg || pkg.vendorProfileId !== vendorProfileId) throw new ForbiddenException();
     return this.prisma.gigPackage.delete({ where: { id: packageId } });
+  }
+
+  async reportGig(gigId: string, reporterId: string | null, dto: ReportGigDto) {
+    const gig = await this.prisma.gig.findFirst({
+      where: { OR: [{ id: gigId }, { slug: gigId }] },
+    });
+    if (!gig) throw new NotFoundException('Service gig not found');
+
+    const report = await this.prisma.gigReport.create({
+      data: {
+        gigId: gig.id,
+        reporterId: reporterId || null,
+        reporterName: dto.reporterName || null,
+        reporterEmail: dto.reporterEmail || null,
+        reason: dto.reason,
+        description: dto.description,
+        status: ReportStatus.PENDING,
+      },
+      include: {
+        gig: { select: { id: true, title: true, slug: true } },
+      },
+    });
+
+    return {
+      success: true,
+      message: 'Thank you for your report. Our trust & safety team has received this and will review it promptly.',
+      reportId: report.id,
+    };
   }
 
   private toSlug(title: string) {
