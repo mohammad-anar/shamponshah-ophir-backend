@@ -24,6 +24,7 @@ import { MessagesModule } from './messages/messages.module';
 import { AdminModule } from './admin/admin.module';
 import { ContactModule } from './contact/contact.module';
 import { UploadModule } from './upload/upload.module';
+import { AnalyticsModule } from './analytics/analytics.module';
 
 @Module({
   imports: [
@@ -54,6 +55,7 @@ import { UploadModule } from './upload/upload.module';
     AdminModule,
     ContactModule,
     UploadModule,
+    AnalyticsModule,
   ],
   controllers: [AppController],
   providers: [AppService],
