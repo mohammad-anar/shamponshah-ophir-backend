@@ -45,3 +45,11 @@ export class JobQueryDto {
   @ApiPropertyOptional() @Type(() => Number) @IsNumber() @IsOptional() limit?: number = 10;
   @ApiPropertyOptional() @IsOptional() excludeOffered?: boolean | string;
 }
+
+export class AcceptOfferDto {
+  @ApiPropertyOptional({ description: 'Specific Stripe payment method ID to charge (if not default)' })
+  @IsString()
+  @IsOptional()
+  paymentMethodId?: string;
+}
+
