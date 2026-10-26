@@ -45,20 +45,23 @@ export class JobsService {
     }
 
     let categoryId = dto.categoryId;
-    if (!categoryId && dto.category) {
+    if (categoryId) {
+      const cat = await this.prisma.category.findUnique({ where: { id: categoryId } });
+      if (!cat || !cat.isActive) {
+        throw new BadRequestException('Selected category does not exist or is inactive.');
+      }
+    } else if (dto.category) {
       const cat = await this.prisma.category.findFirst({
         where: {
+          isActive: true,
           OR: [
+            { id: dto.category },
             { name: { contains: dto.category, mode: 'insensitive' } },
             { slug: { contains: dto.category.toLowerCase().replace(/[^a-z0-9]/g, '-'), mode: 'insensitive' } },
           ],
         },
       });
       if (cat) categoryId = cat.id;
-    }
-    if (!categoryId) {
-      const firstCat = await this.prisma.category.findFirst();
-      if (firstCat) categoryId = firstCat.id;
     }
 
     const { category, publishNow, eventDate: rawEventDate, ...rest } = dto;
