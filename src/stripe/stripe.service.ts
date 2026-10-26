@@ -142,6 +142,33 @@ export class StripeService {
     }, { idempotencyKey: params.idempotencyKey || `milestone-release-${params.milestoneId}` });
   }
 
+  // ── Order Connect Transfer (85% to vendor, 15% platform fee retained) ──
+
+  async transferOrderFunds(params: {
+    amount: number;
+    vendorStripeAccountId: string;
+    orderId: string;
+    sourceTransaction?: string;
+    idempotencyKey?: string;
+  }) {
+    const amountInCents = Math.round(params.amount * 100);
+    const transferPayload: any = {
+      amount: amountInCents,
+      currency: 'usd',
+      destination: params.vendorStripeAccountId,
+      transfer_group: params.orderId,
+      metadata: { orderId: params.orderId, type: 'ORDER_ESCROW_RELEASE' },
+    };
+    if (params.sourceTransaction) {
+      transferPayload.source_transaction = params.sourceTransaction;
+    }
+
+    return this.stripe.transfers.create(
+      transferPayload,
+      { idempotencyKey: params.idempotencyKey || `order-release-${params.orderId}` }
+    );
+  }
+
   // ── Stripe Connect (Vendor Express onboarding) ────────────
 
   async createConnectAccount(vendorId: string, email: string) {
