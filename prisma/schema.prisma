@@ -53,23 +53,35 @@ enum JobStatus {
 enum OfferStatus {
   PENDING
   ACCEPTED
+  NOT_SELECTED
   REJECTED
   WITHDRAWN
   EXPIRED
+}
+
+enum OrderSource {
+  GIG
+  JOB
 }
 
 enum OrderStatus {
   PENDING_PAYMENT
   ACTIVE
   IN_PROGRESS
+  DELIVERED
+  REVISION_REQUESTED
   COMPLETED
   CANCELLED
   DISPUTED
+  COMPLETED_WITH_PARTIAL_REFUND
+  REFUNDED
 }
 
 enum MilestoneStatus {
   LOCKED
   FUNDED
+  IN_PROGRESS
+  SUBMITTED
   PENDING_RELEASE
   APPROVED_PENDING_RELEASE
   RELEASED
@@ -159,6 +171,7 @@ model ClientProfile {
 
   jobs            Job[]
   orders          Order[]
+  events          Event[]
   disputes        Dispute[]       @relation("ClientDisputes")
   paymentMethods  PaymentMethod[]
   clientReviews   Review[]        @relation("ClientReviews")
@@ -211,6 +224,8 @@ model VendorProfile {
   vendorReviews   Review[]         @relation("VendorReviews")
   vendorDisputes  Dispute[]        @relation("VendorDisputes")
   levelHistory    LevelHistory[]
+  wallet          VendorWallet?
+  ledgerEntries   WalletLedgerEntry[]
 
   @@map("vendor_profiles")
 }
@@ -379,6 +394,7 @@ model Job {
   biddingDeadline DateTime?
   status          JobStatus     @default(DRAFT)
   isPostedToFamily Boolean      @default(false)
+  eventId         String?
   createdAt       DateTime      @default(now())
   updatedAt       DateTime      @updatedAt
 
@@ -421,6 +437,7 @@ model Order {
   clientProfile         ClientProfile @relation(fields: [clientProfileId], references: [id])
   vendorProfileId       String
   vendorProfile         VendorProfile @relation("VendorOrders", fields: [vendorProfileId], references: [id])
+  source                OrderSource   @default(GIG)
   gigId                 String?
   gig                   Gig?          @relation(fields: [gigId], references: [id])
   packageId             String?
@@ -430,21 +447,32 @@ model Order {
   offerId               String?       @unique
   offer                 Offer?        @relation(fields: [offerId], references: [id])
   status                OrderStatus   @default(PENDING_PAYMENT)
+  paymentStatus         PaymentStatus @default(PENDING)
+  amount                Decimal       @default(0) @db.Decimal(10, 2)
   subtotal              Decimal       @db.Decimal(10, 2)
   platformFee           Decimal       @db.Decimal(10, 2)
+  vendorNet             Decimal       @default(0) @db.Decimal(10, 2)
   grandTotal            Decimal       @db.Decimal(10, 2)
   addonsJson            Json?
   stripePaymentIntentId String?
+  idempotencyKey        String?
+  eventId               String?
   eventDate             DateTime?
   deliveryNotes         String?       @db.Text
+  paidAt                DateTime?
+  deliveredAt           DateTime?
+  completedAt           DateTime?
+  cancelledAt           DateTime?
   createdAt             DateTime      @default(now())
   updatedAt             DateTime      @updatedAt
 
-  milestones   Milestone[]
-  transactions Transaction[]
-  orderReviews Review[]      @relation("OrderReviews")
-  disputes     Dispute[]
+  milestones    Milestone[]
+  transactions  Transaction[]
+  orderReviews  Review[]            @relation("OrderReviews")
+  disputes      Dispute[]
+  ledgerEntries WalletLedgerEntry[]
 
+  @@index([idempotencyKey])
   @@map("orders")
 }
 
@@ -829,4 +857,94 @@ model AuditLog {
   createdAt DateTime @default(now())
 
   @@map("audit_logs")
+}
+
+model Event {
+  id              String         @id @default(cuid())
+  clientProfileId String?
+  clientProfile   ClientProfile? @relation(fields: [clientProfileId], references: [id])
+  title           String?
+  occasion        String?
+  eventDate       DateTime?
+  location        String?
+  city            String?
+  state           String?
+  guestCount      Int?
+  isPrimary       Boolean        @default(false)
+  createdAt       DateTime       @default(now())
+  updatedAt       DateTime       @default(now()) @updatedAt
+
+  @@map("events")
+}
+
+// ─────────────────────────────────────────────────────────────
+// STRIPE IDEMPOTENT WEBHOOK EVENTS
+// ─────────────────────────────────────────────────────────────
+
+model StripeWebhookEvent {
+  id          String   @id @default(cuid())
+  eventId     String   @unique
+  eventType   String
+  processedAt DateTime @default(now())
+
+  @@map("stripe_webhook_events")
+}
+
+// ─────────────────────────────────────────────────────────────
+// VENDOR WALLET & LEDGER
+// ─────────────────────────────────────────────────────────────
+
+enum LedgerStatus {
+  PENDING
+  CLEARING
+  AVAILABLE
+  WITHDRAWN
+  CANCELLED
+  REFUNDED
+}
+
+enum LedgerEntryType {
+  ORDER_PAYMENT
+  DELIVERY_ACCEPTED
+  FUNDS_CLEARED
+  WITHDRAWAL
+  REFUND_DEDUCTION
+}
+
+model VendorWallet {
+  id                      String        @id @default(cuid())
+  vendorProfileId         String        @unique
+  vendorProfile           VendorProfile @relation(fields: [vendorProfileId], references: [id], onDelete: Cascade)
+  pendingAmount           Decimal       @default(0) @db.Decimal(10, 2)
+  pendingForReleaseAmount Decimal       @default(0) @db.Decimal(10, 2)
+  availableAmount         Decimal       @default(0) @db.Decimal(10, 2)
+  totalEarned             Decimal       @default(0) @db.Decimal(10, 2)
+  totalWithdrawn          Decimal       @default(0) @db.Decimal(10, 2)
+  createdAt               DateTime      @default(now())
+  updatedAt               DateTime      @updatedAt
+
+  ledgerEntries           WalletLedgerEntry[]
+
+  @@map("vendor_wallets")
+}
+
+model WalletLedgerEntry {
+  id              String          @id @default(cuid())
+  walletId        String
+  wallet          VendorWallet    @relation(fields: [walletId], references: [id], onDelete: Cascade)
+  vendorProfileId String
+  vendorProfile   VendorProfile   @relation(fields: [vendorProfileId], references: [id], onDelete: Cascade)
+  orderId         String?
+  order           Order?          @relation(fields: [orderId], references: [id], onDelete: SetNull)
+  type            LedgerEntryType @default(ORDER_PAYMENT)
+  gross           Decimal         @db.Decimal(10, 2)
+  platformFee     Decimal         @db.Decimal(10, 2)
+  vendorNet       Decimal         @db.Decimal(10, 2)
+  status          LedgerStatus    @default(PENDING)
+  clearingEndsAt  DateTime?
+  description     String?
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  @@map("wallet_ledger_entries")
 }
