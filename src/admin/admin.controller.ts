@@ -1,7 +1,15 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import { Body, Controller, Get, Param, Patch, Post, Query, Req, UseGuards } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { AdminService } from './admin.service';
-import { UpdateVendorStatusDto, UpdateLevelRuleDto, AdminQueryDto } from './dto/admin.dto';
+import {
+  UpdateVendorStatusDto,
+  UpdateLevelRuleDto,
+  AdminQueryDto,
+  ApproveGigDto,
+  RejectGigDto,
+  ModerateReportDto,
+  UpdateGigStatusAdminDto,
+} from './dto/admin.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
@@ -102,10 +110,37 @@ export class AdminController {
     return this.adminService.getAllGigs(query);
   }
 
+  @Get('gigs/pending')
+  @ApiOperation({ summary: 'Get all gigs awaiting admin verification (Admin)' })
+  getPendingGigs(@Query() query: AdminQueryDto) {
+    return this.adminService.getPendingGigs(query);
+  }
+
+  @Post('gigs/:id/approve')
+  @ApiOperation({ summary: 'Approve and activate pending gig (Admin)' })
+  approveGig(@Param('id') id: string, @Req() req: any, @Body() body: ApproveGigDto) {
+    const adminId = req?.user?.id || req?.user?.sub;
+    return this.adminService.approveGig(id, adminId, body?.adminNotes);
+  }
+
+  @Post('gigs/:id/reject')
+  @ApiOperation({ summary: 'Reject pending gig with required reason (Admin)' })
+  rejectGig(@Param('id') id: string, @Req() req: any, @Body() body: RejectGigDto) {
+    const adminId = req?.user?.id || req?.user?.sub;
+    return this.adminService.rejectGig(id, body.reason, adminId, body?.adminNotes);
+  }
+
+  @Post('gigs/:id/suspend')
+  @ApiOperation({ summary: 'Suspend/hide gig listing (Admin)' })
+  suspendGig(@Param('id') id: string, @Req() req: any, @Body() body: { reason?: string }) {
+    const adminId = req?.user?.id || req?.user?.sub;
+    return this.adminService.suspendGig(id, body?.reason, adminId);
+  }
+
   @Patch('gigs/:id/status')
   @ApiOperation({ summary: 'Change gig status (Admin)' })
-  updateGigStatus(@Param('id') id: string, @Body() body: { status: string }) {
-    return this.adminService.updateGigStatus(id, body.status);
+  updateGigStatus(@Param('id') id: string, @Body() body: UpdateGigStatusAdminDto) {
+    return this.adminService.updateGigStatus(id, body.status, body?.reason, body?.adminNotes);
   }
 
   @Get('jobs')
@@ -192,6 +227,45 @@ export class AdminController {
   @ApiOperation({ summary: 'Manually award job to vendor offer (Admin)' })
   awardJobBid(@Param('id') jobId: string, @Param('offerId') offerId: string) {
     return this.adminService.awardJobBid(jobId, offerId);
+  }
+
+  // ── Reports & Safety Moderation ────────────────────────────
+
+  @Get('reports')
+  @ApiOperation({ summary: 'Get all service reports submitted by users (Admin)' })
+  getAllReports(@Query() query: AdminQueryDto) {
+    return this.adminService.getAllReports(query);
+  }
+
+  @Patch('reports/:id/action')
+  @ApiOperation({ summary: 'Take moderation action on report: suspend gig, dismiss, or resolve (Admin)' })
+  moderateReport(
+    @Param('id') id: string,
+    @Req() req: any,
+    @Body() body: ModerateReportDto,
+  ) {
+    const adminId = req?.user?.id || req?.user?.sub;
+    return this.adminService.moderateReport(id, body.action, body?.adminNotes, adminId);
+  }
+
+  // ── Transactions, Wallets & Offers Control ─────────────────
+
+  @Get('transactions')
+  @ApiOperation({ summary: 'Get all platform transactions and escrow movements (Admin)' })
+  getAllTransactions(@Query() query: AdminQueryDto) {
+    return this.adminService.getAllTransactions(query);
+  }
+
+  @Get('wallets')
+  @ApiOperation({ summary: 'Get all vendor wallets and balances overview (Admin)' })
+  getAllWallets(@Query() query: AdminQueryDto) {
+    return this.adminService.getAllWallets(query);
+  }
+
+  @Get('offers')
+  @ApiOperation({ summary: 'Get all vendor job bids and proposals (Admin)' })
+  getAllOffers(@Query() query: AdminQueryDto) {
+    return this.adminService.getAllOffers(query);
   }
 }
 
