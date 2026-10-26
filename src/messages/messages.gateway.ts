@@ -55,6 +55,10 @@ export class MessagesGateway implements OnGatewayConnection, OnGatewayDisconnect
     }
   }
 
+  emitToOrder(orderId: string, event: string, payload: any) {
+    this.notifyOrderRoom(orderId, event, payload);
+  }
+
   // ── Token extraction helper ───────────────────────────────
   extractUser(client: Socket, providedToken?: string): { userId: string; role: Role } | null {
     const rawToken =
@@ -102,16 +106,16 @@ export class MessagesGateway implements OnGatewayConnection, OnGatewayDisconnect
 
     const isClient = order.clientProfile?.userId === user.userId;
     const isVendor = order.vendorProfile?.userId === user.userId;
-    const isAdminDisputed = user.role === Role.ADMIN && order.status === OrderStatus.DISPUTED;
+    const isAdmin = user.role === Role.ADMIN;
 
-    if (!isClient && !isVendor && !isAdminDisputed) {
+    if (!isClient && !isVendor && !isAdmin) {
       return {
         allowed: false,
-        reason: 'Unauthorized: Only the assigned client, vendor, or an admin during an active dispute can access this order chat.',
+        reason: 'Unauthorized: Only the assigned client, vendor, or an admin can access this order chat.',
       };
     }
 
-    return { allowed: true, order, isClient, isVendor, isAdmin: isAdminDisputed };
+    return { allowed: true, order, isClient, isVendor, isAdmin };
   }
 
   // ── ORDER CHAT ROOM: order:{orderId} ───────────────────────
