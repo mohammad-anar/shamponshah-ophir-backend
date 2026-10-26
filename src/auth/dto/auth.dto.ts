@@ -59,3 +59,9 @@ export class ResetPasswordDto {
   @MinLength(8)
   password: string;
 }
+
+export class ResendVerificationDto {
+  @ApiProperty({ example: 'emily@example.com' })
+  @IsEmail()
+  email: string;
+}
