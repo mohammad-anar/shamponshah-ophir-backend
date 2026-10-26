@@ -459,9 +459,17 @@ model Order {
   eventId               String?
   eventDate             DateTime?
   deliveryNotes         String?       @db.Text
+  deliveryFiles         String[]      @default([])
+  deliveries            Json?
+  revisionReason        String?       @db.Text
+  revisionCount         Int           @default(0)
   paidAt                DateTime?
   deliveredAt           DateTime?
   completedAt           DateTime?
+  clearingEndsAt        DateTime?
+  autoCompleteAt        DateTime?
+  transferredAt         DateTime?
+  stripeTransferId      String?
   cancelledAt           DateTime?
   createdAt             DateTime      @default(now())
   updatedAt             DateTime      @updatedAt
