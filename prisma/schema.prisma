@@ -471,6 +471,25 @@ model Order {
   transferredAt         DateTime?
   stripeTransferId      String?
   cancelledAt           DateTime?
+  cancelReason          String?       @db.Text
+  cancelProof           String[]      @default([])
+  cancelStatus          String?
+  cancelRequestedAt     DateTime?
+  cancelResponseNote    String?       @db.Text
+  partialRefundAmount   Decimal?      @db.Decimal(10, 2)
+  refundReason          String?       @db.Text
+  refundProof           String[]      @default([])
+  refundStatus          String?
+  refundRequestedAt     DateTime?
+  refundResponseNote    String?       @db.Text
+  escalatedToAdmin      Boolean       @default(false)
+  escalatedAt           DateTime?
+  escalatedBy           String?
+  escalationReason      String?       @db.Text
+  refundedAmount        Decimal?      @default(0) @db.Decimal(10, 2)
+  adminResolution       String?       @db.Text
+  adminResolvedAt       DateTime?
+  adminResolvedBy       String?
   createdAt             DateTime      @default(now())
   updatedAt             DateTime      @updatedAt
 
@@ -634,11 +653,14 @@ model Dispute {
   reason          String
   description     String        @db.Text
   status          DisputeStatus @default(OPEN)
-  evidence        Json?
-  resolution      String?       @db.Text
-  resolvedAt      DateTime?
-  createdAt       DateTime      @default(now())
-  updatedAt       DateTime      @updatedAt
+  evidence              Json?
+  resolution            String?       @db.Text
+  resolvedAt            DateTime?
+  requestedRefundAmount Decimal?      @db.Decimal(10, 2)
+  escalatedToAdmin      Boolean       @default(false)
+  disputeType           String?       @default("DISPUTE")
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
 
   disputeMessages DisputeMessage[]
 
