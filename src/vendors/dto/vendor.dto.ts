@@ -177,4 +177,15 @@ export class VendorQueryDto {
   @IsNumber()
   @Type(() => Number)
   limit?: number = 12;
+
+  @ApiPropertyOptional({ description: 'Session-based seed for consistent pagination and fair ranking shuffle' })
+  @IsOptional()
+  @IsString()
+  seed?: string;
+
+  @ApiPropertyOptional({ description: 'Sort criteria (recommended, rating, orders, level)' })
+  @IsOptional()
+  @IsString()
+  sortBy?: string;
 }
+
