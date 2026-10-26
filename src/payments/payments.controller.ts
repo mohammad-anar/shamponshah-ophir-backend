@@ -3,6 +3,8 @@ import { ApiTags, ApiOperation, ApiBearerAuth } from '@nestjs/swagger';
 import { PaymentsService } from './payments.service';
 import {
   CreatePaymentIntentDto,
+  CreateOrderPaymentIntentDto,
+  ConfirmOrderPaymentDto,
   CreateDisputeDto,
   ResolveDisputeDto,
   WithdrawEarningsDto,
@@ -30,6 +32,22 @@ export class PaymentsController {
   @ApiOperation({ summary: 'Create Stripe PaymentIntent for order escrow deposit (Client)' })
   createPaymentIntent(@Req() req: any, @Body() dto: CreatePaymentIntentDto) {
     return this.paymentsService.createPaymentIntent(req.user.clientProfileId, dto);
+  }
+
+  @Post('order-intent')
+  @UseGuards(RolesGuard)
+  @Roles(Role.CLIENT)
+  @ApiOperation({ summary: 'Create Stripe PaymentIntent for whole order escrow deposit (Client)' })
+  createOrderPaymentIntent(@Req() req: any, @Body() dto: CreateOrderPaymentIntentDto) {
+    return this.paymentsService.createOrderPaymentIntent(req.user.clientProfileId, dto);
+  }
+
+  @Post('confirm-order-payment')
+  @UseGuards(RolesGuard)
+  @Roles(Role.CLIENT)
+  @ApiOperation({ summary: 'Confirm Stripe PaymentIntent and activate order escrow hold (Client)' })
+  confirmOrderPayment(@Req() req: any, @Body() dto: ConfirmOrderPaymentDto) {
+    return this.paymentsService.confirmOrderPayment(req.user.clientProfileId, dto);
   }
 
   @Get('methods')
@@ -122,6 +140,14 @@ export class PaymentsController {
   @ApiOperation({ summary: 'Get vendor earnings, available/pending/escrow balances (Vendor)' })
   getVendorEarnings(@Req() req: any) {
     return this.paymentsService.getVendorEarnings(req.user.vendorProfileId);
+  }
+
+  @Get('vendor/wallet')
+  @UseGuards(RolesGuard)
+  @Roles(Role.VENDOR)
+  @ApiOperation({ summary: 'Get vendor wallet: Pending, Pending for release, Available balances, and ledger (Vendor)' })
+  getVendorWallet(@Req() req: any) {
+    return this.paymentsService.getVendorWallet(req.user.vendorProfileId);
   }
 
   @Post('vendor/withdraw')
