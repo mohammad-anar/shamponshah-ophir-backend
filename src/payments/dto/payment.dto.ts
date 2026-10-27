@@ -139,3 +139,40 @@ export class PurchaseBidCreditsDto {
   @ApiProperty({ description: 'Stripe payment method ID' })
   @IsString() paymentMethodId: string;
 }
+
+export class PayOrderDto {
+  @ApiProperty({ description: 'Order ID to fund via escrow' })
+  @IsString()
+  orderId: string;
+
+  @ApiPropertyOptional({ description: 'Saved payment method ID (if using saved card)' })
+  @IsOptional()
+  @IsString()
+  paymentMethodId?: string;
+
+  @ApiPropertyOptional({ description: 'Card number' })
+  @IsOptional()
+  @IsString()
+  cardNumber?: string;
+
+  @ApiPropertyOptional({ description: 'Card expiration date (MM/YY)' })
+  @IsOptional()
+  @IsString()
+  cardExpiry?: string;
+
+  @ApiPropertyOptional({ description: 'Card security code (CVC)' })
+  @IsOptional()
+  @IsString()
+  cardCvc?: string;
+
+  @ApiPropertyOptional({ description: 'Cardholder name' })
+  @IsOptional()
+  @IsString()
+  cardholderName?: string;
+
+  @ApiPropertyOptional({ description: 'Save card for future payments' })
+  @IsOptional()
+  @IsBoolean()
+  saveCard?: boolean;
+}
+
