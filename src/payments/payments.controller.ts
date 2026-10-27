@@ -11,6 +11,7 @@ import {
   PurchaseBidCreditsDto,
   SavePaymentMethodDto,
   UpdateVendorPayoutPreferencesDto,
+  PayOrderDto,
 } from './dto/payment.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { RolesGuard } from '../auth/guards/roles.guard';
@@ -49,6 +50,14 @@ export class PaymentsController {
   @ApiOperation({ summary: 'Confirm Stripe PaymentIntent and activate order escrow hold (Client)' })
   confirmOrderPayment(@Req() req: any, @Body() dto: ConfirmOrderPaymentDto) {
     return this.paymentsService.confirmOrderPayment(req.user.clientProfileId, dto);
+  }
+
+  @Post('pay-order')
+  @UseGuards(RolesGuard)
+  @Roles(Role.CLIENT)
+  @ApiOperation({ summary: 'Pay for order and secure escrow hold using card details or saved card (Client)' })
+  payOrder(@Req() req: any, @Body() dto: PayOrderDto) {
+    return this.paymentsService.payOrder(req.user.clientProfileId, dto);
   }
 
   @Get('methods')
