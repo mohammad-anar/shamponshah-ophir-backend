@@ -262,13 +262,16 @@ export class OrdersService implements OnModuleInit, OnModuleDestroy {
         paymentStatus: PaymentStatus.PENDING,
         idempotencyKey: dto.idempotencyKey,
         milestones: {
-          create: escrowSplit.map((m, i) => ({
-            label: m.label,
-            percentage: m.percentage,
-            amount: subtotal.mul(m.percentage / 100).toDecimalPlaces(2),
-            status: MilestoneStatus.LOCKED,
-            sortOrder: i,
-          })),
+          create: escrowSplit.map((m, i) => {
+            const pct = Number(m.percentage) || (escrowSplit.length === 1 ? 100 : Math.round(100 / escrowSplit.length));
+            return {
+              label: m.label || m.name || m.title || `Milestone ${i + 1}`,
+              percentage: pct,
+              amount: subtotal.mul(pct / 100).toDecimalPlaces(2),
+              status: MilestoneStatus.LOCKED,
+              sortOrder: i,
+            };
+          }),
         },
       },
       include: { milestones: true, clientProfile: true, vendorProfile: true },
