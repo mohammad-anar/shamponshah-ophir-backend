@@ -14,11 +14,11 @@ import { RolesGuard } from '../auth/guards/roles.guard';
 import { Roles } from '../auth/decorators/roles.decorator';
 import { Role } from '@prisma/client';
 
-@ApiTags('Family Hub (Client Workspace)')
+@ApiTags('Collaboration Hub (Client Workspace)')
 @ApiBearerAuth()
 @UseGuards(JwtAuthGuard, RolesGuard)
 @Roles(Role.CLIENT)
-@Controller('family-hub')
+@Controller(['family-hub', 'collaboration'])
 export class FamilyHubController {
   constructor(private readonly familyHubService: FamilyHubService) {}
 
